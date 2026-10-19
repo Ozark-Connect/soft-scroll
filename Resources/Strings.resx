@@ -189,4 +189,5 @@
   <data name="Add" xml:space="preserve"><value>Add</value></data>
   <data name="Cancel" xml:space="preserve"><value>Cancel</value></data>
   <data name="SelectApplication" xml:space="preserve"><value>Select Application</value></data>
+  <data name="TrayStillRunning" xml:space="preserve"><value>Soft Scroll is still running in the system tray. Use Exit in the tray menu to quit.</value></data>
 </root>

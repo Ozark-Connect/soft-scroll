@@ -199,6 +199,13 @@ public sealed class TrayIcon : IDisposable
         _notifyIcon.Icon = GetCurrentIcon();
     }
 
+    /// <summary>Tells the user the app keeps running after the settings window is closed.</summary>
+    public void ShowStillRunningHint()
+    {
+        var L = new Func<string, string>(LocalizationManager.Get);
+        _notifyIcon.ShowBalloonTip(3000, L("AppName"), L("TrayStillRunning"), ToolTipIcon.Info);
+    }
+
     public void UpdateTouchpadState(bool isTouchpad)
     {
         _isTouchpadActive = isTouchpad;

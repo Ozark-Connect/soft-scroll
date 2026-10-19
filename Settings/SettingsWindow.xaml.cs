@@ -487,6 +487,22 @@ public partial class SettingsWindow : Window
         }
     }
 
+    /// <summary>Raised when the window hides to the tray instead of closing.</summary>
+    public event EventHandler? HiddenToTray;
+
+    protected override void OnClosing(System.ComponentModel.CancelEventArgs e)
+    {
+        // The X (and the Close button) hide to the tray; only tray Exit ends the app
+        if (!App.IsShuttingDown)
+        {
+            e.Cancel = true;
+            Hide();
+            HiddenToTray?.Invoke(this, EventArgs.Empty);
+            return;
+        }
+        base.OnClosing(e);
+    }
+
     protected override void OnClosed(EventArgs e)
     {
         _statsVm.Stop();

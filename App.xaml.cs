@@ -50,6 +50,10 @@ public partial class App : System.Windows.Application
     private System.Threading.EventWaitHandle? _activateEvent;
     private bool _isPrimaryInstance;
 
+    /// <summary>True once the user chose Exit; the settings window then really closes.</summary>
+    public static bool IsShuttingDown { get; private set; }
+    private bool _trayHintShown;
+
     protected override void OnStartup(StartupEventArgs e)
     {
         _instanceMutex = new System.Threading.Mutex(true, InstanceMutexName, out _isPrimaryInstance);
@@ -72,6 +76,9 @@ public partial class App : System.Windows.Application
             while (_activateEvent.WaitOne())
                 Dispatcher.InvokeAsync(() => ShowSettingsWindow());
         }) { IsBackground = true, Name = "SingleInstanceListener" }.Start();
+
+        // Logoff/shutdown must not be cancelled by the settings window hiding to the tray
+        SessionEnding += (_, _) => IsShuttingDown = true;
 
         LoggingConfig.Configure();
 
@@ -100,7 +107,7 @@ public partial class App : System.Windows.Application
 
         _tray = new TrayIcon(_settings.Enabled);
         _tray.OpenSettingsRequested += (_, _) => ShowSettingsWindow();
-        _tray.ExitRequested += (_, _) => Shutdown();
+        _tray.ExitRequested += (_, _) => { IsShuttingDown = true; Shutdown(); };
         _tray.EnabledToggled += (_, enabled) =>
         {
             if (_vm is null) return;
@@ -479,6 +486,12 @@ public partial class App : System.Windows.Application
         {
             _settingsWindow = new SettingsWindow(_vm);
             _settingsWindow.Closed += (_, _) => _settingsWindow = null;
+            _settingsWindow.HiddenToTray += (_, _) =>
+            {
+                if (_trayHintShown) return;
+                _trayHintShown = true;
+                _tray?.ShowStillRunningHint();
+            };
             _settingsWindow.Owner = null;
 
             // Apply minimized state before showing if needed
