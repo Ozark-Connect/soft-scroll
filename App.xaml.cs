@@ -43,8 +43,36 @@ public partial class App : System.Windows.Application
     // Hook thread only: the current middle press was swallowed for middle-click scroll
     private bool _middleClickSwallowed;
 
+    // Single instance: two copies would both hook the wheel and smooth every scroll twice
+    private const string InstanceMutexName = @"Local\SoftScroll.SingleInstance";
+    private const string ActivateEventName = @"Local\SoftScroll.ShowSettings";
+    private System.Threading.Mutex? _instanceMutex;
+    private System.Threading.EventWaitHandle? _activateEvent;
+    private bool _isPrimaryInstance;
+
     protected override void OnStartup(StartupEventArgs e)
     {
+        _instanceMutex = new System.Threading.Mutex(true, InstanceMutexName, out _isPrimaryInstance);
+        if (!_isPrimaryInstance)
+        {
+            // Ask the running instance to show its settings window, then exit
+            try
+            {
+                using var activate = System.Threading.EventWaitHandle.OpenExisting(ActivateEventName);
+                activate.Set();
+            }
+            catch (System.Threading.WaitHandleCannotBeOpenedException) { }
+            Shutdown();
+            return;
+        }
+
+        _activateEvent = new System.Threading.EventWaitHandle(false, System.Threading.EventResetMode.AutoReset, ActivateEventName);
+        new System.Threading.Thread(() =>
+        {
+            while (_activateEvent.WaitOne())
+                Dispatcher.InvokeAsync(() => ShowSettingsWindow());
+        }) { IsBackground = true, Name = "SingleInstanceListener" }.Start();
+
         LoggingConfig.Configure();
 
         NativeMethods.timeBeginPeriod(1);
@@ -423,6 +451,7 @@ public partial class App : System.Windows.Application
     protected override void OnExit(ExitEventArgs e)
     {
         base.OnExit(e);
+        if (!_isPrimaryInstance) return;
         _hook?.Dispose();
         _hotkey?.Dispose();
         _engine?.Dispose();
