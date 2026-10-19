@@ -52,7 +52,8 @@ public sealed class GlobalHotkey : IDisposable
             var msg = wParam.ToInt32();
             if (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN)
             {
-                var vk = (ushort)((long)lParam >> 16 & 0xFFFF);
+                // lParam points to a KBDLLHOOKSTRUCT; vkCode is its first DWORD
+                var vk = (ushort)Marshal.ReadInt32(lParam);
 
                 bool ctrl = (NativeMethods.GetAsyncKeyState(NativeMethods.VK_CONTROL) & 0x8000) != 0;
                 bool shift = (NativeMethods.GetAsyncKeyState(NativeMethods.VK_SHIFT) & 0x8000) != 0;
