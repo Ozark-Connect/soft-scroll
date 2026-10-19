@@ -50,5 +50,9 @@ Name: "{userstartup}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: st
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
 
+[Registry]
+; The app writes this Run value itself when "start with Windows" is enabled; remove it on uninstall
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: none; ValueName: "SoftScroll"; Flags: dontcreatekey uninsdeletevalue
+
 [UninstallDelete]
-Type: filesandordirs; Name: "{localappdata}\SoftScroll"
+Type: filesandordirs; Name: "{userappdata}\SoftScroll"
