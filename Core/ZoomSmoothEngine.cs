@@ -89,9 +89,7 @@ public sealed class ZoomSmoothEngine : IDisposable
                     EmitZoom(output);
                 }
 
-                var sleep = FRAME_MS - (sw.Elapsed.TotalMilliseconds - nowMs);
-                if (sleep > 0) Thread.Sleep((int)Math.Round(sleep));
-                else Thread.SpinWait(ScrollConstants.SPIN_WAIT_COUNT);
+                SmoothScrollEngine.WaitUntil(sw, nowMs + FRAME_MS);
             }
             catch (Exception ex)
             {

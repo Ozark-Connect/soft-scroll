@@ -196,9 +196,7 @@ public sealed class SmoothScrollEngine : IDisposable
                 // Buffered SendInput: emit both axes in a single call
                 if (outV != 0 || outH != 0) SendWheel(outV, outH, shiftWheel);
 
-                var sleep = frameMs - (sw.Elapsed.TotalMilliseconds - nowMs);
-                if (sleep > 0.5) Thread.Sleep((int)Math.Round(sleep));
-                else Thread.SpinWait((int)SPIN_WAIT_COUNT);
+                WaitUntil(sw, nowMs + frameMs);
             }
             catch (Exception ex)
             {
@@ -206,6 +204,19 @@ public sealed class SmoothScrollEngine : IDisposable
                 System.Diagnostics.Debug.WriteLine($"SmoothScrollEngine worker: {ex.Message}");
             }
         }
+    }
+
+    /// <summary>
+    /// Waits for an absolute frame deadline. Thread.Sleep alone rounds to whole milliseconds
+    /// (3 or 5 ms around a 4.2 ms frame), and the uneven event spacing shows as judder.
+    /// Sleeps in 1 ms slices while far away, then spins for the last stretch.
+    /// </summary>
+    internal static void WaitUntil(Stopwatch sw, double deadlineMs)
+    {
+        while (deadlineMs - sw.Elapsed.TotalMilliseconds > 1.5)
+            Thread.Sleep(1);
+        while (sw.Elapsed.TotalMilliseconds < deadlineMs)
+            Thread.SpinWait(20);
     }
 
     /// <summary>

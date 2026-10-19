@@ -140,29 +140,22 @@ public sealed class MiddleClickScrollEngine : IDisposable
                 var magnitude = Math.Sqrt(nx * nx + ny * ny);
                 DirectionChanged?.Invoke(nx, ny, magnitude);
 
-                accumV += speedV;
-                accumH += speedH;
+                // Accumulate in wheel units, not whole notches, so autoscroll moves every frame
+                // instead of jumping a full notch at a time
+                accumV += speedV * WHEEL_DELTA;
+                accumH += speedH * WHEEL_DELTA;
 
                 // Buffered SendInput: emit both axes in a single call
-                int vPulses = 0, hPulses = 0;
-                if (Math.Abs(accumV) >= 1.0)
-                {
-                    vPulses = (int)accumV;
-                    accumV -= vPulses;
-                }
-                if (Math.Abs(accumH) >= 1.0)
-                {
-                    hPulses = (int)accumH;
-                    accumH -= hPulses;
-                }
+                var vUnits = (int)accumV;
+                var hUnits = (int)accumH;
+                accumV -= vUnits;
+                accumH -= hUnits;
 
                 var dir = _invert ? -1 : 1;
-                if (vPulses != 0 || hPulses != 0)
-                    SendWheel(-vPulses * WHEEL_DELTA * dir, hPulses * WHEEL_DELTA * dir);
+                if (vUnits != 0 || hUnits != 0)
+                    SendWheel(-vUnits * dir, hUnits * dir);
 
-                var sleep = FRAME_MS - (sw.Elapsed.TotalMilliseconds - nowMs);
-                if (sleep > 0) Thread.Sleep((int)Math.Round(sleep));
-                else Thread.SpinWait(ScrollConstants.SPIN_WAIT_COUNT);
+                SmoothScrollEngine.WaitUntil(sw, nowMs + FRAME_MS);
             }
             catch (Exception ex)
             {
