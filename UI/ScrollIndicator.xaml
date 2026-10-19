@@ -8,8 +8,8 @@
              IsHitTestVisible="False"
              ShowInTaskbar="False"
              Topmost="True"
-             WindowStartupLocation="Manual"
-             Loaded="OnLoaded">
+             ShowActivated="False"
+             WindowStartupLocation="Manual">
     <Grid>
         <!-- Shadow effect -->
         <Border x:Name="Container"

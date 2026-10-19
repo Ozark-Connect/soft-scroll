@@ -232,7 +232,8 @@ public partial class SettingsWindow : Window
         TxtAboutDesc.Text   = L("AboutDesc");
         TxtAppName.Text = "Soft Scroll";
         TxtAppTagline.Text = L("AppTagline");
-        TxtVersion.Text = "Version 0.3.2";
+        var version = typeof(SettingsWindow).Assembly.GetName().Version;
+        TxtVersion.Text = version is null ? "" : $"Version {version.Major}.{version.Minor}.{version.Build}";
         TxtMadeWith.Text    = L("MadeWith");
         TxtLanguageLabel.Text = L("Language");
         TxtSystemLabel.Text      = L("System");

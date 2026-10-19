@@ -20,6 +20,7 @@ public partial class MiddleClickOverlay : Window
     public MiddleClickOverlay()
     {
         InitializeComponent();
+        SourceInitialized += (_, _) => OverlayWindowHelper.MakeNonInteractive(this);
         _fadeTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(1500) };
         _fadeTimer.Tick += (s, e) =>
         {
@@ -32,16 +33,20 @@ public partial class MiddleClickOverlay : Window
         };
     }
 
+    /// <param name="screenX">Screen X in pixels.</param>
+    /// <param name="screenY">Screen Y in pixels.</param>
     public void ShowAt(int screenX, int screenY)
     {
-        Left = screenX - Width / 2;
-        Top = screenY - Height / 2;
+        var p = OverlayWindowHelper.PixelsToDips(this, screenX, screenY);
+        Left = p.X - Width / 2;
+        Top = p.Y - Height / 2;
         _currentSpeed = 0;
         SpeedText.Text = "0";
         SpeedText.Opacity = 0.5;
         Show();
     }
 
+    /// <summary>Call on the UI thread.</summary>
     public void UpdateDirection(double nx, double ny, double magnitude)
     {
         if (!IsVisible) return;

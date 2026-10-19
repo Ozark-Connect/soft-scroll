@@ -135,6 +135,17 @@ public sealed class AppSettings
         catch (Exception ex)
         {
             Serilog.Log.Warning(ex, "[AppSettings] Failed to load settings");
+            // The next Save() would overwrite the unreadable file with defaults; keep a copy
+            try
+            {
+                var path = GetConfigPath();
+                if (File.Exists(path))
+                    File.Copy(path, path + ".bak", overwrite: true);
+            }
+            catch (Exception copyEx)
+            {
+                Serilog.Log.Warning(copyEx, "[AppSettings] Failed to back up unreadable settings");
+            }
         }
         return CreateDefault();
     }

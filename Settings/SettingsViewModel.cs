@@ -17,8 +17,14 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         Apply(settings);
     }
 
+    // Settings with no UI control; carried through so Snapshot() + Save() does not reset them
+    private bool _enableGlobalHotkey = true;
+    private bool _showTrayIconState = true;
+
     public void Apply(AppSettings s)
     {
+        _enableGlobalHotkey = s.EnableGlobalHotkey;
+        _showTrayIconState = s.ShowTrayIconState;
         Enabled = s.Enabled;
         StepSizePx = s.StepSizePx;
         AnimationTimeMs = s.AnimationTimeMs;
@@ -81,8 +87,21 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
             DisableWhileHoldingKeys.Add(key);
     }
 
-    public AppSettings Snapshot() => new()
+    /// <summary>
+    /// Copies the current values into a new AppSettings, clamped to valid ranges.
+    /// Text boxes can hold values like 0 while the user types; the engine must never see them.
+    /// </summary>
+    public AppSettings Snapshot()
     {
+        var s = BuildSnapshot();
+        s.Clamp();
+        return s;
+    }
+
+    private AppSettings BuildSnapshot() => new()
+    {
+        EnableGlobalHotkey = _enableGlobalHotkey,
+        ShowTrayIconState = _showTrayIconState,
         Enabled = Enabled,
         StepSizePx = StepSizePx,
         AnimationTimeMs = AnimationTimeMs,

@@ -12,14 +12,14 @@ public sealed class GlobalHotkey : IDisposable
     private const int WM_KEYUP = 0x0101;
     private const int WM_SYSKEYUP = 0x0105;
 
-    private IntPtr _hook = IntPtr.Zero;
-    private NativeMethods.HookProc? _proc;
+    private readonly LowLevelHookThread _thread;
     private readonly int _id;
     private readonly uint _modifiers;
     private readonly ushort _key;
     private volatile bool _enabled = true;
     private bool _keyHeld;
 
+    /// <summary>Raised on the hook thread, not the UI thread.</summary>
     public event EventHandler? HotkeyPressed;
 
     public GlobalHotkey(int id, uint modifiers, ushort key)
@@ -27,24 +27,12 @@ public sealed class GlobalHotkey : IDisposable
         _id = id;
         _modifiers = modifiers;
         _key = key;
+        _thread = new LowLevelHookThread(WH_KEYBOARD_LL, "HotkeyHook", HookCallback);
     }
 
-    public void Install()
-    {
-        if (_hook != IntPtr.Zero) return;
+    public void Install() => _thread.Install();
 
-        _proc = HookCallback;
-        using var curProcess = System.Diagnostics.Process.GetCurrentProcess();
-        using var curModule = curProcess.MainModule!;
-        _hook = NativeMethods.SetWindowsHookEx(WH_KEYBOARD_LL, _proc, NativeMethods.GetModuleHandle(curModule.ModuleName), 0);
-    }
-
-    public void Uninstall()
-    {
-        if (_hook == IntPtr.Zero) return;
-        NativeMethods.UnhookWindowsHookEx(_hook);
-        _hook = IntPtr.Zero;
-    }
+    public void Uninstall() => _thread.Uninstall();
 
     public void SetEnabled(bool enabled) => _enabled = enabled;
 
@@ -62,19 +50,24 @@ public sealed class GlobalHotkey : IDisposable
             }
             else if (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN)
             {
+                bool ctrl = IsDown(NativeMethods.VK_CONTROL);
+                bool shift = IsDown(NativeMethods.VK_SHIFT);
+                bool alt = IsDown(NativeMethods.VK_MENU);
+                bool win = IsDown(NativeMethods.VK_LWIN) || IsDown(NativeMethods.VK_RWIN);
+                // AltGr reports as LCtrl + RAlt; AltGr+S types a character on many layouts
+                bool altGr = IsDown(NativeMethods.VK_RMENU);
 
-                bool ctrl = (NativeMethods.GetAsyncKeyState(NativeMethods.VK_CONTROL) & 0x8000) != 0;
-                bool shift = (NativeMethods.GetAsyncKeyState(NativeMethods.VK_SHIFT) & 0x8000) != 0;
-                bool alt = (NativeMethods.GetAsyncKeyState(NativeMethods.VK_MENU) & 0x8000) != 0;
-
-                bool modCtrl = (_modifiers & 0x0002) != 0;
-                bool modShift = (_modifiers & 0x0004) != 0;
-                bool modAlt = (_modifiers & 0x0001) != 0;
+                bool modCtrl = (_modifiers & HotkeyConstants.MOD_CONTROL) != 0;
+                bool modShift = (_modifiers & HotkeyConstants.MOD_SHIFT) != 0;
+                bool modAlt = (_modifiers & HotkeyConstants.MOD_ALT) != 0;
+                bool modWin = (_modifiers & HotkeyConstants.MOD_WIN) != 0;
 
                 if (vk == _key &&
                     ctrl == modCtrl &&
                     shift == modShift &&
-                    alt == modAlt)
+                    alt == modAlt &&
+                    win == modWin &&
+                    !(altGr && modCtrl && modAlt))
                 {
                     // Key autorepeat sends repeated keydowns; MOD_NOREPEAT fires once per press
                     bool noRepeat = (_modifiers & HotkeyConstants.MOD_NOREPEAT) != 0;
@@ -87,8 +80,10 @@ public sealed class GlobalHotkey : IDisposable
                 }
             }
         }
-        return NativeMethods.CallNextHookEx(_hook, nCode, wParam, lParam);
+        return NativeMethods.CallNextHookEx(_thread.Handle, nCode, wParam, lParam);
     }
+
+    private static bool IsDown(int vk) => (NativeMethods.GetAsyncKeyState(vk) & 0x8000) != 0;
 
     public void Dispose()
     {

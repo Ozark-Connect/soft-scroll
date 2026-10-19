@@ -39,6 +39,25 @@ public class VolumeConverter : IValueConverter
     }
 }
 
+/// <summary>
+/// Binds an enum property to a ComboBox whose items carry the enum member name in Tag
+/// (SelectedValuePath="Tag").
+/// </summary>
+public class EnumToStringConverter : IValueConverter
+{
+    public object? Convert(object value, Type targetType, object parameter, CultureInfo culture)
+    {
+        return value?.ToString();
+    }
+
+    public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)
+    {
+        if (value is string s && Enum.TryParse(targetType, s, out var result))
+            return result!;
+        return System.Windows.Data.Binding.DoNothing;
+    }
+}
+
 public class BoolToVisibilityConverter : IValueConverter
 {
     public object Convert(object value, Type targetType, object parameter, CultureInfo culture)

@@ -1,7 +1,6 @@
 using System;
 using System.Runtime.InteropServices;
-using System.Windows;
-using System.Windows.Interop;
+using System.Windows.Threading;
 using Serilog;
 using SoftScroll.Native;
 
@@ -9,24 +8,18 @@ namespace SoftScroll.Core;
 
 /// <summary>
 /// Listens for Raw Input messages to detect which input device (touchpad vs mouse)
-/// is currently being used. Also listens for device change events to re-enumerate devices.
-/// Uses a hidden message-only window.
+/// is currently being used. Also listens for device arrival/removal to re-enumerate devices.
+/// Uses a hidden message-only window on the thread that calls <see cref="Initialize"/>.
 /// </summary>
 public sealed class RawInputListener : IDisposable
 {
-    private static readonly int WM_INPUT = NativeMethods.WM_INPUT;
-    private const int WM_DEVICECHANGE = 0x0219;
+    private static readonly IntPtr HWND_MESSAGE = new(-3);
 
     private readonly InputDeviceDetector _deviceDetector;
-    private HwndSource? _hwndSource;
     private IntPtr _hwnd;
     private bool _disposed;
     private bool _registered;
-
-    // Throttle: minimum time between raw input processing (ms)
-    // Increased to aggressively reduce UI thread load from mouse movement
-    private const int THROTTLE_MS = 500;
-    private long _lastProcessTick;
+    private DispatcherTimer? _reenumerateTimer;
 
     // MUST keep delegate reference alive to prevent GC from collecting it
     private WndProcDelegate? _myWndProcDelegate;
@@ -39,28 +32,27 @@ public sealed class RawInputListener : IDisposable
     }
 
     /// <summary>
-    /// Initializes the Raw Input listener with a hidden window.
-    /// Call this after the main window handle is available.
+    /// Creates the hidden window and registers for Raw Input. Safe to call more than once.
+    /// Call on the UI thread.
     /// </summary>
-    public void Initialize(Window ownerWindow)
+    public void Initialize()
     {
-        if (_registered)
+        if (_registered || _disposed)
             return;
 
         try
         {
-            // Create a hidden window for Raw Input
-            _hwnd = CreateHiddenWindow();
+            if (_hwnd == IntPtr.Zero)
+                _hwnd = CreateHiddenWindow();
             if (_hwnd == IntPtr.Zero)
             {
                 Log.Warning("[RawInput] Failed to create hidden window");
                 return;
             }
 
-            _hwndSource = HwndSource.FromHwnd(_hwnd);
-            _hwndSource?.AddHook(WndProc);
+            // Device arrival floods in right after registration (one per device); coalesce re-enumeration
+            _reenumerateTimer ??= new DispatcherTimer(TimeSpan.FromMilliseconds(300), DispatcherPriority.Background, OnReenumerate, Dispatcher.CurrentDispatcher) { IsEnabled = false };
 
-            // Register for Raw Input from mice
             if (!RegisterRawInputDevices())
             {
                 Log.Warning("[RawInput] Failed to register Raw Input devices");
@@ -98,34 +90,37 @@ public sealed class RawInputListener : IDisposable
         }
 
         // Create message-only window
-        _hwnd = CreateWindowEx(
+        var hwnd = CreateWindowEx(
             0,
             new IntPtr(classAtom),
             "SoftScroll RawInput",
             0,
             0, 0, 0, 0,
-            IntPtr.Zero,
+            HWND_MESSAGE,
             IntPtr.Zero,
             GetModuleHandle(null),
             IntPtr.Zero);
 
-        if (_hwnd == IntPtr.Zero)
+        if (hwnd == IntPtr.Zero)
         {
             Log.Warning("[RawInput] CreateWindowEx failed: {Error}", Marshal.GetLastWin32Error());
         }
 
-        return _hwnd;
+        return hwnd;
     }
 
     private bool RegisterRawInputDevices()
     {
-        var rid = new NativeMethods.RAWINPUTDEVICE[1];
-        rid[0].usUsagePage = 0x01;
-        rid[0].usUsage = 0x02;
-        rid[0].dwFlags = 0x00000100; // RIDEV_INPUTSINK
-        rid[0].hwndTarget = _hwnd;
+        // Mice (including a touchpad's mouse collection) and Precision Touchpad digitizer reports.
+        // INPUTSINK: receive input while another app has focus. DEVNOTIFY: WM_INPUT_DEVICE_CHANGE.
+        const uint flags = NativeMethods.RIDEV_INPUTSINK | NativeMethods.RIDEV_DEVNOTIFY;
+        var rid = new NativeMethods.RAWINPUTDEVICE[]
+        {
+            new() { usUsagePage = NativeMethods.HID_USAGE_PAGE_GENERIC, usUsage = NativeMethods.HID_USAGE_GENERIC_MOUSE, dwFlags = flags, hwndTarget = _hwnd },
+            new() { usUsagePage = NativeMethods.HID_USAGE_PAGE_DIGITIZER, usUsage = NativeMethods.HID_USAGE_DIGITIZER_TOUCH_PAD, dwFlags = flags, hwndTarget = _hwnd },
+        };
 
-        bool result = NativeMethods.RegisterRawInputDevices(rid, 1, (uint)Marshal.SizeOf<NativeMethods.RAWINPUTDEVICE>());
+        bool result = NativeMethods.RegisterRawInputDevices(rid, (uint)rid.Length, (uint)Marshal.SizeOf<NativeMethods.RAWINPUTDEVICE>());
         if (!result)
         {
             Log.Warning("[RawInput] RegisterRawInputDevices failed: {Error}", Marshal.GetLastWin32Error());
@@ -137,76 +132,37 @@ public sealed class RawInputListener : IDisposable
 
     private IntPtr MyWndProc(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam)
     {
-        if (msg == WM_INPUT)
+        if (msg == NativeMethods.WM_INPUT)
         {
-            ProcessRawInputThrottled(lParam);
-            return IntPtr.Zero;
+            ProcessRawInput(lParam);
+            // DefWindowProc performs the required cleanup for WM_INPUT
         }
-        else if (msg == WM_DEVICECHANGE)
+        else if (msg == NativeMethods.WM_INPUT_DEVICE_CHANGE)
         {
-            OnDeviceChange(wParam);
+            _reenumerateTimer?.Stop();
+            _reenumerateTimer?.Start();
+            return IntPtr.Zero;
         }
         return DefWindowProc(hWnd, msg, wParam, lParam);
     }
 
-    private IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
+    private void ProcessRawInput(IntPtr lParam)
     {
-        if (msg == WM_INPUT)
-        {
-            ProcessRawInputThrottled(lParam);
-            handled = true;
-            return IntPtr.Zero;
-        }
-        else if (msg == WM_DEVICECHANGE)
-        {
-            OnDeviceChange(wParam);
-            handled = true;
-            return IntPtr.Zero;
-        }
-        handled = false;
-        return IntPtr.Zero;
-    }
-
-    private void ProcessRawInputThrottled(IntPtr lParam)
-    {
-        var now = Environment.TickCount64;
-        if (now - _lastProcessTick < THROTTLE_MS)
-            return;
-        _lastProcessTick = now;
-
         try
         {
-            uint size = 0;
-            uint result = NativeMethods.GetRawInputData(lParam, NativeMethods.RID_INPUT, IntPtr.Zero, ref size, (uint)Marshal.SizeOf<NativeMethods.RAWINPUTHEADER>());
-
-            if (size == 0 || result == unchecked((uint)-1))
-                return;
-
-            // Reuse a static buffer to avoid frequent AllocHGlobal calls
-            IntPtr data = GetOrCreateBuffer((int)size);
+            // The header alone identifies the device; no need to copy the report
+            uint headerSize = (uint)Marshal.SizeOf<NativeMethods.RAWINPUTHEADER>();
+            uint size = headerSize;
+            IntPtr data = GetOrCreateBuffer((int)headerSize);
             if (data == IntPtr.Zero) return;
 
-            result = NativeMethods.GetRawInputData(lParam, NativeMethods.RID_INPUT, data, ref size, (uint)Marshal.SizeOf<NativeMethods.RAWINPUTHEADER>());
+            uint result = NativeMethods.GetRawInputData(lParam, NativeMethods.RID_HEADER, data, ref size, headerSize);
             if (result == unchecked((uint)-1) || result == 0)
                 return;
 
             var header = Marshal.PtrToStructure<NativeMethods.RAWINPUTHEADER>(data);
-
-            if (header.dwType == NativeMethods.RIM_TYPEMOUSE)
-            {
-                IntPtr mouseDataPtr = data + Marshal.SizeOf<NativeMethods.RAWINPUTHEADER>();
-                var mouseData = Marshal.PtrToStructure<NativeMethods.RAWINPUTMOUSE>(mouseDataPtr);
-
-                // Only process button/wheel events, SKIP mousemove (usFlags bit 0x01)
-                if ((mouseData.usFlags & 0x01) == 0)
-                {
-                    _deviceDetector.ProcessRawInput(header.hDevice, header.dwType);
-                }
-            }
-            else if (header.dwType == NativeMethods.RIM_TYPEHID)
-            {
-                _deviceDetector.ProcessRawInput(header.hDevice, header.dwType);
-            }
+            if (header.dwType == NativeMethods.RIM_TYPEMOUSE || header.dwType == NativeMethods.RIM_TYPEHID)
+                _deviceDetector.ProcessRawInput(header.hDevice);
         }
         catch (Exception ex)
         {
@@ -230,25 +186,18 @@ public sealed class RawInputListener : IDisposable
         return _buffer;
     }
 
-    private void OnDeviceChange(IntPtr wParam)
+    private void OnReenumerate(object? sender, EventArgs e)
     {
-        int eventType = wParam.ToInt32();
-        if (eventType == 0x8000 || eventType == 0x8004)
+        _reenumerateTimer?.Stop();
+        Log.Information("[RawInput] Input devices changed, re-enumerating");
+        try
         {
-            Log.Information("[RawInput] Device change detected: {Event}", eventType == 0x8000 ? "connected" : "disconnected");
-
-            System.Threading.Tasks.Task.Run(() =>
-            {
-                try
-                {
-                    _deviceDetector.EnumerateDevices();
-                    DevicesChanged?.Invoke(this, EventArgs.Empty);
-                }
-                catch (Exception ex)
-                {
-                    Log.Warning(ex, "[RawInput] Error re-enumerating devices");
-                }
-            });
+            _deviceDetector.EnumerateDevices();
+            DevicesChanged?.Invoke(this, EventArgs.Empty);
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "[RawInput] Error re-enumerating devices");
         }
     }
 
@@ -261,11 +210,7 @@ public sealed class RawInputListener : IDisposable
 
         try
         {
-            if (_hwndSource != null)
-            {
-                _hwndSource.RemoveHook(WndProc);
-                _hwndSource = null;
-            }
+            _reenumerateTimer?.Stop();
 
             if (_hwnd != IntPtr.Zero)
             {
@@ -294,13 +239,14 @@ public sealed class RawInputListener : IDisposable
 
     private delegate IntPtr WndProcDelegate(IntPtr hWnd, int Msg, IntPtr wParam, IntPtr lParam);
 
-    [DllImport("user32.dll")]
+    // Unicode throughout: the WNDCLASSEX strings are UTF-16, so the W entry points must be used
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern IntPtr DefWindowProc(IntPtr hWnd, int Msg, IntPtr wParam, IntPtr lParam);
 
-    [DllImport("user32.dll", SetLastError = true)]
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern uint RegisterClassEx(ref WNDCLASSEX lpWndClass);
 
-    [DllImport("user32.dll", SetLastError = true)]
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern IntPtr CreateWindowEx(
         uint dwExStyle,
         IntPtr lpClassName,
@@ -319,7 +265,7 @@ public sealed class RawInputListener : IDisposable
     [DllImport("kernel32.dll")]
     private static extern IntPtr GetModuleHandle(string? lpModuleName);
 
-    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     private struct WNDCLASSEX
     {
         public uint cbSize;

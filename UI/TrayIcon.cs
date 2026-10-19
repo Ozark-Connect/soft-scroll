@@ -14,7 +14,8 @@ public sealed class TrayIcon : IDisposable
     private readonly ToolStripMenuItem _enabledItem;
     private readonly ToolStripMenuItem _toggleHotkeyItem;
     private readonly ToolStripMenuItem _exitItem;
-    private readonly AppSettings _settings;
+    // Mirror of the app's enabled state; App pushes changes through UpdateEnabled
+    private bool _enabled;
 
     private Icon? _iconEnabled;
     private Icon? _iconDisabled;
@@ -26,9 +27,9 @@ public sealed class TrayIcon : IDisposable
     public event EventHandler<bool>? EnabledToggled;
     public event EventHandler? ToggleHotkeyRequested;
 
-    public TrayIcon(AppSettings settings)
+    public TrayIcon(bool enabled)
     {
-        _settings = settings;
+        _enabled = enabled;
 
         // Start icon loading asynchronously to avoid blocking UI startup
         LoadIconsAsync();
@@ -38,8 +39,9 @@ public sealed class TrayIcon : IDisposable
         _openSettingsItem = new ToolStripMenuItem(L("TraySettings"));
         _openSettingsItem.Click += (s, e) => OpenSettingsRequested?.Invoke(this, EventArgs.Empty);
 
-        _enabledItem = new ToolStripMenuItem(L("TrayEnabled")) { Checked = _settings.Enabled, CheckOnClick = true };
-        _enabledItem.CheckedChanged += (s, e) => EnabledToggled?.Invoke(this, _enabledItem.Checked);
+        _enabledItem = new ToolStripMenuItem(L("TrayEnabled")) { Checked = _enabled, CheckOnClick = true };
+        // Click, not CheckedChanged: UpdateEnabled sets Checked from code and must not re-raise the toggle
+        _enabledItem.Click += (s, e) => EnabledToggled?.Invoke(this, _enabledItem.Checked);
 
         _toggleHotkeyItem = new ToolStripMenuItem(L("TrayToggleHotkey"));
         _toggleHotkeyItem.Click += (s, e) => ToggleHotkeyRequested?.Invoke(this, EventArgs.Empty);
@@ -60,7 +62,7 @@ public sealed class TrayIcon : IDisposable
             Visible = true,
             Text = GetTrayTooltip(),
             ContextMenuStrip = cms,
-            Icon = _settings.Enabled ? _iconEnabled : _iconDisabled
+            Icon = _enabled ? _iconEnabled : _iconDisabled
         };
 
         _notifyIcon.DoubleClick += (s, e) => OpenSettingsRequested?.Invoke(this, EventArgs.Empty);
@@ -99,8 +101,8 @@ public sealed class TrayIcon : IDisposable
             return $"{appName} ({L("TrayTouchpadActive")})";
         }
         
-        return _settings.Enabled 
-            ? $"{appName} ({enabledState})" 
+        return _enabled
+            ? $"{appName} ({enabledState})"
             : $"{appName} ({L("TrayDisabled")})";
     }
 
@@ -108,12 +110,8 @@ public sealed class TrayIcon : IDisposable
     {
         if (e.Button == MouseButtons.Left)
         {
-            // Toggle enabled state on left click
-            var newState = !_settings.Enabled;
-            _settings.Enabled = newState;
-            _settings.Save();
-            UpdateEnabled(newState);
-            EnabledToggled?.Invoke(this, newState);
+            // Toggle enabled state on left click; App saves the setting and calls UpdateEnabled
+            EnabledToggled?.Invoke(this, !_enabled);
         }
     }
 
@@ -195,6 +193,7 @@ public sealed class TrayIcon : IDisposable
 
     public void UpdateEnabled(bool enabled)
     {
+        _enabled = enabled;
         _enabledItem.Checked = enabled;
         _notifyIcon.Text = GetTrayTooltip();
         _notifyIcon.Icon = GetCurrentIcon();
@@ -214,8 +213,8 @@ public sealed class TrayIcon : IDisposable
         {
             return _iconTouchpadActive ?? _iconEnabled ?? SystemIcons.Application;
         }
-        return _settings.Enabled 
-            ? (_iconEnabled ?? SystemIcons.Application) 
+        return _enabled
+            ? (_iconEnabled ?? SystemIcons.Application)
             : (_iconDisabled ?? SystemIcons.Application);
     }
 

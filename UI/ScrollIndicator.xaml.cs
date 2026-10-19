@@ -10,12 +10,16 @@ namespace SoftScroll.UI;
 
 public partial class ScrollIndicator : Window
 {
+    private const double EdgeMargin = 20;
+
     private DispatcherTimer? _hideTimer;
     private int _lastSpeed;
+    private IndicatorPosition _position = IndicatorPosition.TopRight;
 
     public ScrollIndicator()
     {
         InitializeComponent();
+        SourceInitialized += (_, _) => OverlayWindowHelper.MakeNonInteractive(this);
         _hideTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(800) };
         _hideTimer.Tick += (s, e) =>
         {
@@ -24,13 +28,15 @@ public partial class ScrollIndicator : Window
         };
     }
 
-    private void OnLoaded(object sender, RoutedEventArgs e)
+    /// <summary>Applies the Visual Feedback settings: screen corner and how long the indicator stays.</summary>
+    public void ApplySettings(IndicatorPosition position, int durationMs)
     {
-        // Set initial position to top-right
-        var screenWidth = (int)SystemParameters.PrimaryScreenWidth;
-        var screenHeight = (int)SystemParameters.PrimaryScreenHeight;
-        Left = screenWidth - Width - 20;
-        Top = 20;
+        Dispatcher.Invoke(() =>
+        {
+            _position = position;
+            if (_hideTimer != null)
+                _hideTimer.Interval = TimeSpan.FromMilliseconds(Math.Max(100, durationMs));
+        });
     }
 
     private void FadeOut()
@@ -43,23 +49,26 @@ public partial class ScrollIndicator : Window
         });
     }
 
+    /// <summary>
+    /// Shows the indicator at the configured position on the monitor that contains the cursor.
+    /// </summary>
+    /// <param name="screenX">Cursor X in pixels.</param>
+    /// <param name="screenY">Cursor Y in pixels.</param>
     public void ShowAt(int screenX, int screenY, int speed)
     {
         Dispatcher.Invoke(() =>
         {
-            // Position near cursor
-            Left = Math.Max(0, Math.Min(screenX - Width / 2, SystemParameters.PrimaryScreenWidth - Width));
-            Top = Math.Max(0, Math.Min(screenY - Height / 2, SystemParameters.PrimaryScreenHeight - Height));
-            
+            var area = OverlayWindowHelper.WorkAreaDips(this, screenX, screenY);
+            PlaceInArea(area);
+
             // Update speed text
             _lastSpeed = Math.Abs(speed);
             SpeedText.Text = _lastSpeed.ToString();
-            
-            // Make visible with fade-in
+
+            // Make visible with fade-in, without taking focus from the scrolled app
             Opacity = 0;
             Show();
-            Activate();
-            
+
             var fade = new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(150));
             BeginAnimation(OpacityProperty, fade);
 
@@ -82,36 +91,30 @@ public partial class ScrollIndicator : Window
         });
     }
 
-    public void SetPosition(IndicatorPosition position)
+    private void PlaceInArea(Rect area)
     {
-        Dispatcher.Invoke(() =>
+        switch (_position)
         {
-            var screenWidth = SystemParameters.PrimaryScreenWidth;
-            var screenHeight = SystemParameters.PrimaryScreenHeight;
-
-            switch (position)
-            {
-                case IndicatorPosition.TopLeft:
-                    Left = 20;
-                    Top = 20;
-                    break;
-                case IndicatorPosition.TopRight:
-                    Left = screenWidth - Width - 20;
-                    Top = 20;
-                    break;
-                case IndicatorPosition.BottomLeft:
-                    Left = 20;
-                    Top = screenHeight - Height - 20;
-                    break;
-                case IndicatorPosition.BottomRight:
-                    Left = screenWidth - Width - 20;
-                    Top = screenHeight - Height - 20;
-                    break;
-                case IndicatorPosition.Center:
-                    Left = (screenWidth - Width) / 2;
-                    Top = (screenHeight - Height) / 2;
-                    break;
-            }
-        });
+            case IndicatorPosition.TopLeft:
+                Left = area.Left + EdgeMargin;
+                Top = area.Top + EdgeMargin;
+                break;
+            case IndicatorPosition.BottomLeft:
+                Left = area.Left + EdgeMargin;
+                Top = area.Bottom - Height - EdgeMargin;
+                break;
+            case IndicatorPosition.BottomRight:
+                Left = area.Right - Width - EdgeMargin;
+                Top = area.Bottom - Height - EdgeMargin;
+                break;
+            case IndicatorPosition.Center:
+                Left = area.Left + (area.Width - Width) / 2;
+                Top = area.Top + (area.Height - Height) / 2;
+                break;
+            default: // TopRight
+                Left = area.Right - Width - EdgeMargin;
+                Top = area.Top + EdgeMargin;
+                break;
+        }
     }
 }

@@ -17,6 +17,9 @@ public sealed class MiddleClickScrollEngine : IDisposable
     private int _originX, _originY;
     private int _currentX, _currentY;
     private int _deadZone = 10;
+    private volatile bool _invert;
+    // True once the cursor left the dead zone during the current press
+    private volatile bool _leftDeadZone;
 
     private static readonly double FRAME_MS = ScrollConstants.FRAME_MS;
     private static readonly int WHEEL_DELTA = ScrollConstants.WHEEL_DELTA;
@@ -26,6 +29,8 @@ public sealed class MiddleClickScrollEngine : IDisposable
     public event Action<double, double, double>? DirectionChanged; // (normalizedX, normalizedY, magnitude) for overlay
 
     public void UpdateDeadZone(int px) { lock (_lock) _deadZone = px; }
+
+    public void UpdateInvertDirection(bool invert) => _invert = invert;
 
     public void Start()
     {
@@ -54,16 +59,20 @@ public sealed class MiddleClickScrollEngine : IDisposable
             _currentX = x;
             _currentY = y;
             _active = true;
+            _leftDeadZone = false;
         }
         Activated?.Invoke(x, y);
         _signal.Set();
     }
 
-    public void OnMiddleUp()
+    /// <returns>True if the cursor left the dead zone, i.e. the press was used to scroll.</returns>
+    public bool OnMiddleUp()
     {
-        lock (_lock) { _active = false; }
-        Deactivated?.Invoke();
+        bool wasActive;
+        lock (_lock) { wasActive = _active; _active = false; }
+        if (wasActive) Deactivated?.Invoke();
         _signal.Set();
+        return _leftDeadZone;
     }
 
     public void OnMouseMove(int x, int y)
@@ -73,6 +82,8 @@ public sealed class MiddleClickScrollEngine : IDisposable
         {
             _currentX = x;
             _currentY = y;
+            if (Math.Abs(x - _originX) > _deadZone || Math.Abs(y - _originY) > _deadZone)
+                _leftDeadZone = true;
         }
     }
 
@@ -145,8 +156,9 @@ public sealed class MiddleClickScrollEngine : IDisposable
                     accumH -= hPulses;
                 }
 
+                var dir = _invert ? -1 : 1;
                 if (vPulses != 0 || hPulses != 0)
-                    SendWheel(-vPulses * WHEEL_DELTA, hPulses * WHEEL_DELTA);
+                    SendWheel(-vPulses * WHEEL_DELTA * dir, hPulses * WHEEL_DELTA * dir);
 
                 var sleep = FRAME_MS - (sw.Elapsed.TotalMilliseconds - nowMs);
                 if (sleep > 0) Thread.Sleep((int)Math.Round(sleep));
@@ -169,27 +181,37 @@ public sealed class MiddleClickScrollEngine : IDisposable
     {
         var size = Marshal.SizeOf<NativeMethods.INPUT>();
 
-        if (hMouseData != 0)
+        if (hMouseData != 0 && vMouseData != 0)
         {
-            var inputs = new NativeMethods.INPUT[]
+            var inputs = new[]
             {
-                new() { type = 0, U = new NativeMethods.InputUnion { mi = new NativeMethods.MOUSEINPUT { dwFlags = NativeMethods.MOUSEEVENTF_WHEEL, mouseData = vMouseData } } },
-                new() { type = 0, U = new NativeMethods.InputUnion { mi = new NativeMethods.MOUSEINPUT { dwFlags = NativeMethods.MOUSEEVENTF_HWHEEL, mouseData = hMouseData } } },
+                NativeMethods.MouseInput(NativeMethods.MOUSEEVENTF_WHEEL, vMouseData),
+                NativeMethods.MouseInput(NativeMethods.MOUSEEVENTF_HWHEEL, hMouseData),
             };
             NativeMethods.SendInput(2, inputs, size);
         }
+        else if (hMouseData != 0)
+        {
+            NativeMethods.SendInput(1, [NativeMethods.MouseInput(NativeMethods.MOUSEEVENTF_HWHEEL, hMouseData)], size);
+        }
         else if (vMouseData != 0)
         {
-            var inp = new NativeMethods.INPUT
-            {
-                type = 0,
-                U = new NativeMethods.InputUnion
-                {
-                    mi = new NativeMethods.MOUSEINPUT { dwFlags = NativeMethods.MOUSEEVENTF_WHEEL, mouseData = vMouseData }
-                }
-            };
-            NativeMethods.SendInput(1, [inp], size);
+            NativeMethods.SendInput(1, [NativeMethods.MouseInput(NativeMethods.MOUSEEVENTF_WHEEL, vMouseData)], size);
         }
+    }
+
+    /// <summary>
+    /// Re-sends a plain middle click. Used when the button was released without scrolling,
+    /// so middle-click actions (open link in new tab, close tab, paste) still work.
+    /// </summary>
+    public static void ReplayMiddleClick()
+    {
+        var inputs = new[]
+        {
+            NativeMethods.MouseInput(NativeMethods.MOUSEEVENTF_MIDDLEDOWN),
+            NativeMethods.MouseInput(NativeMethods.MOUSEEVENTF_MIDDLEUP),
+        };
+        NativeMethods.SendInput(2, inputs, Marshal.SizeOf<NativeMethods.INPUT>());
     }
 
     public void Dispose() => Stop();

@@ -95,7 +95,15 @@ public sealed class SmoothScrollEngine : IDisposable
         _thread?.Join(1000);
     }
 
-    public void OnWheel(int delta)
+    public void OnWheel(int delta) => OnVerticalWheel(delta, null);
+
+    /// <summary>
+    /// Vertical wheel for an app with its own profile. The profile settings stay
+    /// attached to the axis so the whole animation (duration, easing, momentum) uses them.
+    /// </summary>
+    public void OnWheelWithSettings(int delta, AppSettings customSettings) => OnVerticalWheel(delta, customSettings);
+
+    private void OnVerticalWheel(int delta, AppSettings? profile)
     {
         lock (_lock)
         {
@@ -104,26 +112,20 @@ public sealed class SmoothScrollEngine : IDisposable
                 _h = new();
             }
 
-            var dir = _s.ReverseWheelDirection ? -1 : 1;
+            var s = profile ?? _s;
+            var dir = s.ReverseWheelDirection ? -1 : 1;
             var now = Environment.TickCount64;
-            _v.RegisterNotch(now, delta * dir, _s);
+            _v.Profile = profile;
+            _v.RegisterNotch(now, delta * dir, s);
             _lastAxis = ScrollAxis.Vertical;
         }
         _signal.Set();
     }
 
-    public void OnWheelWithSettings(int delta, AppSettings customSettings)
-    {
-        lock (_lock)
-        {
-            var dir = customSettings.ReverseWheelDirection ? -1 : 1;
-            var now = Environment.TickCount64;
-            _v.RegisterNotch(now, delta * dir, customSettings);
-        }
-        _signal.Set();
-    }
-
-    public void OnHWheel(int delta)
+    /// <param name="delta">Horizontal delta in WM_MOUSEHWHEEL convention (positive = right).</param>
+    /// <param name="fromShiftWheel">True when the input was Shift + vertical wheel. Output is then
+    /// re-injected as a vertical wheel while Shift is held, which every Shift+wheel app understands.</param>
+    public void OnHWheel(int delta, bool fromShiftWheel = false)
     {
         lock (_lock)
         {
@@ -135,6 +137,8 @@ public sealed class SmoothScrollEngine : IDisposable
             // No ReverseWheelDirection for horizontal: scrolling right (positive delta)
             // must always mean "scroll right" per Windows convention.
             var now = Environment.TickCount64;
+            _h.Profile = null;
+            _h.FromShiftWheel = fromShiftWheel;
             _h.RegisterNotch(now, delta, _s);
             _lastAxis = ScrollAxis.Horizontal;
         }
@@ -153,11 +157,12 @@ public sealed class SmoothScrollEngine : IDisposable
                 // Check if there's anything to emit
                 bool workAvailable;
                 double remainingTotal;
+                bool shiftWheel;
                 lock (_lock)
                 {
-                    workAvailable = Math.Abs(_v.RemainingPx) >= 0.1
-                        || Math.Abs(_h.RemainingPx) >= 0.1;
+                    workAvailable = _v.HasWork(_s) || _h.HasWork(_s);
                     remainingTotal = Math.Abs(_v.RemainingPx) + Math.Abs(_h.RemainingPx);
+                    shiftWheel = _h.FromShiftWheel;
                 }
 
                 if (!workAvailable)
@@ -184,11 +189,12 @@ public sealed class SmoothScrollEngine : IDisposable
                 lock (_lock)
                 {
                     outV = _v.Step(dt, _s);
-                    if (_s.HorizontalSmoothness) outH = _h.Step(dt, _s); else outH = 0;
+                    if (_s.HorizontalSmoothness) outH = _h.Step(dt, _s);
+                    else { outH = 0; _h = new(); } // setting turned off mid-animation: drop it, or the worker never idles
                 }
 
                 // Buffered SendInput: emit both axes in a single call
-                if (outV != 0 || outH != 0) SendWheel(outV, outH);
+                if (outV != 0 || outH != 0) SendWheel(outV, outH, shiftWheel);
 
                 var sleep = frameMs - (sw.Elapsed.TotalMilliseconds - nowMs);
                 if (sleep > 0.5) Thread.Sleep((int)Math.Round(sleep));
@@ -219,48 +225,33 @@ public sealed class SmoothScrollEngine : IDisposable
         return _targetFrameMs;
     }
 
-    private static void SendWheel(int mouseData, int hMouseData)
+    private static void SendWheel(int mouseData, int hMouseData, bool hFromShiftWheel)
     {
-        // Vertical scroll uses SendInput + MOUSEEVENTF_WHEEL.
-        // Horizontal scroll uses PostMessageW + WM_MOUSEWHEEL + MK_SHIFT, but with
-        // an inverted delta sign. WM_MOUSEHWHEEL (positive = right) and
-        // WM_MOUSEWHEEL+MK_SHIFT (positive = up → interpreted as left by target)
-        // use opposite sign conventions, so we flip the sign to preserve the user's
-        // physical scroll direction. See GitHub issue #13.
-        // Both axes are independent — each uses its own data.
+        // All output goes through SendInput so Windows routes it like real input:
+        // to the control under the cursor, not only to the top-level window.
+        // Horizontal values use the WM_MOUSEHWHEEL convention (positive = right).
+        // Shift+wheel input is re-emitted as a vertical wheel while Shift is still held,
+        // so the sign flips back (Shift + wheel up = left). Tilt-wheel input is re-emitted
+        // as MOUSEEVENTF_HWHEEL unchanged. See GitHub issue #13.
+        var inputs = new NativeMethods.INPUT[2];
+        uint count = 0;
+
         if (hMouseData != 0)
         {
-            if (NativeMethods.GetCursorPos(out var pt))
-            {
-                var hwnd = NativeMethods.WindowFromPoint(pt);
-                if (hwnd != IntPtr.Zero)
-                {
-                    hwnd = NativeMethods.GetAncestor(hwnd, NativeMethods.GA_ROOT);
-                    if (hwnd != IntPtr.Zero)
-                    {
-                        // wParam: MK_SHIFT | (wheelData << 16) — encode delta in high word.
-                        // Invert hMouseData because Shift+vertical convention is opposite of HWHEEL.
-                        IntPtr wParam = (IntPtr)((uint)(-hMouseData) << 16 | NativeMethods.MK_SHIFT);
-                        IntPtr lParam = (IntPtr)((pt.y << 16) | (pt.x & 0xFFFF));
-                        NativeMethods.PostMessageW(hwnd, NativeMethods.WM_MOUSEWHEEL, wParam, lParam);
-                    }
-                }
-            }
+            // If Shift was released mid-animation, a vertical wheel would scroll vertically; use HWHEEL
+            var shiftHeld = (NativeMethods.GetAsyncKeyState(NativeMethods.VK_SHIFT) & 0x8000) != 0;
+            inputs[count++] = hFromShiftWheel && shiftHeld
+                ? NativeMethods.MouseInput(NativeMethods.MOUSEEVENTF_WHEEL, -hMouseData)
+                : NativeMethods.MouseInput(NativeMethods.MOUSEEVENTF_HWHEEL, hMouseData);
         }
 
         if (mouseData != 0)
         {
-            var size = Marshal.SizeOf<NativeMethods.INPUT>();
-            var inp = new NativeMethods.INPUT
-            {
-                type = 0,
-                U = new NativeMethods.InputUnion
-                {
-                    mi = new NativeMethods.MOUSEINPUT { dwFlags = NativeMethods.MOUSEEVENTF_WHEEL, mouseData = mouseData }
-                }
-            };
-            NativeMethods.SendInput(1, [inp], size);
+            inputs[count++] = NativeMethods.MouseInput(NativeMethods.MOUSEEVENTF_WHEEL, mouseData);
         }
+
+        if (count > 0)
+            NativeMethods.SendInput(count, inputs, Marshal.SizeOf<NativeMethods.INPUT>());
     }
 
     public void ResetHorizontalAxis()
@@ -297,10 +288,28 @@ public sealed class SmoothScrollEngine : IDisposable
         public int AccelFactor;
         public double UnitAccum;
 
+        // Settings of the app profile that started this animation; null = global settings
+        public AppSettings? Profile;
+        // Horizontal axis only: input came from Shift + vertical wheel
+        public bool FromShiftWheel;
+
+        // Acceleration counts full notches (120 units), not events, so hi-res wheels
+        // and touchpads that send many small deltas do not hit max acceleration instantly
+        private double _accelNotches;
+
         // Momentum fields
         public double Velocity;       // px/ms
         public bool InMomentum;
         private double _momentumAccum;
+
+        public bool HasWork(AppSettings global)
+        {
+            var s = Profile ?? global;
+            return Math.Abs(RemainingPx) >= 0.1
+                || UnitAccum != 0
+                || InMomentum
+                || (s.MomentumEnabled && Math.Abs(Velocity) > 0.05);
+        }
 
         public void RegisterNotch(long nowMs, int delta, AppSettings s)
         {
@@ -313,9 +322,10 @@ public sealed class SmoothScrollEngine : IDisposable
             }
 
             if (nowMs - LastNotchTime <= s.AccelerationDeltaMs)
-                AccelFactor = Math.Min(s.AccelerationMax, Math.Max(1, AccelFactor + 1));
+                _accelNotches += Math.Abs(delta) / (double)WHEEL_DELTA;
             else
-                AccelFactor = 1;
+                _accelNotches = 0;
+            AccelFactor = Math.Clamp(1 + (int)_accelNotches, 1, Math.Max(1, s.AccelerationMax));
 
             var timeSinceLast = nowMs - LastNotchTime;
             LastNotchTime = nowMs;
@@ -329,12 +339,23 @@ public sealed class SmoothScrollEngine : IDisposable
             {
                 Velocity = pixels / timeSinceLast;
             }
+            else
+            {
+                // A slow notch must not inherit the previous gesture's velocity
+                Velocity = 0;
+            }
         }
 
-        public int Step(double dtMs, AppSettings s)
+        public int Step(double dtMs, AppSettings global)
         {
+            var s = Profile ?? global;
+
+            // Momentum without the setting (e.g. turned off mid-gesture) must not keep the worker busy
+            if (!s.MomentumEnabled && !InMomentum)
+                Velocity = 0;
+
             // Momentum phase: if normal scroll finished and velocity is significant
-            if (s.MomentumEnabled && !InMomentum && Math.Abs(RemainingPx) < 0.1 && Math.Abs(Velocity) > 0.05)
+            if (s.MomentumEnabled && !InMomentum && Math.Abs(RemainingPx) < 0.1 && UnitAccum == 0 && Math.Abs(Velocity) > 0.05)
             {
                 var elapsed = Environment.TickCount64 - LastNotchTime;
                 if (elapsed > 80) // Wait a short moment after last notch
@@ -361,46 +382,45 @@ public sealed class SmoothScrollEngine : IDisposable
                 var wheelUnits = (momentumPx / BASE_STEP_PX) * WHEEL_DELTA;
                 _momentumAccum += wheelUnits / EMIT_UNIT;
 
-                int mPulses = 0;
-                if (Math.Abs(_momentumAccum) >= 1.0)
-                {
-                    mPulses = (int)_momentumAccum;
-                    _momentumAccum -= mPulses;
-                }
+                var mPulses = (int)_momentumAccum;
                 if (mPulses == 0) return 0;
+                // Pulses above the per-frame clamp stay in the accumulator for the next frame
                 mPulses = Math.Clamp(mPulses, PULSE_CLAMP_MIN, PULSE_CLAMP_MAX);
+                _momentumAccum -= mPulses;
                 return mPulses * EMIT_UNIT;
             }
 
             // Normal smooth scroll
-            if (Math.Abs(RemainingPx) < 0.1)
+            if (Math.Abs(RemainingPx) >= 0.1)
             {
+                var duration = Math.Max(1.0, s.AnimationTimeMs);
+                var frac = ComputeEasingFraction(dtMs, duration, s.EasingMode, s.TailToHeadRatio, s.AnimationEasing);
+
+                var emitPx = RemainingPx * frac;
+                RemainingPx -= emitPx;
+                UnitAccum += PxToUnits(emitPx);
+            }
+
+            // Final frame: once less than half a pulse is left, fold the leftover distance into the
+            // accumulator and round it. The gesture emits its full wheel distance, and the last
+            // pulse is not held back for the long exponential tail.
+            var finishing = Math.Abs(PxToUnits(RemainingPx)) < 0.5;
+            if (finishing)
+            {
+                UnitAccum += PxToUnits(RemainingPx);
                 RemainingPx = 0;
+            }
+
+            var pulses = finishing ? (int)Math.Round(UnitAccum) : (int)UnitAccum;
+            var emitted = Math.Clamp(pulses, PULSE_CLAMP_MIN, PULSE_CLAMP_MAX);
+            // Pulses above the per-frame clamp stay in the accumulator for the next frame
+            UnitAccum -= emitted;
+            if (finishing && emitted == pulses)
                 UnitAccum = 0;
-                return 0;
-            }
 
-            var duration = Math.Max(1.0, s.AnimationTimeMs);
-            var frac = ComputeEasingFraction(dtMs, duration, s.EasingMode, s.TailToHeadRatio, s.AnimationEasing);
-
-            var emitPx = RemainingPx * frac;
-            RemainingPx -= emitPx;
-
-            var wUnits = (emitPx / BASE_STEP_PX) * WHEEL_DELTA;
-
-            var units = wUnits / EMIT_UNIT;
-            UnitAccum += units;
-
-            int pulses = 0;
-            if (Math.Abs(UnitAccum) >= 1.0)
-            {
-                pulses = (int)UnitAccum;
-                UnitAccum -= pulses;
-            }
-
-            if (pulses == 0) return 0;
-            pulses = Math.Clamp(pulses, PULSE_CLAMP_MIN, PULSE_CLAMP_MAX);
-            return pulses * EMIT_UNIT;
+            return emitted * EMIT_UNIT;
         }
+
+        private static double PxToUnits(double px) => px / BASE_STEP_PX * WHEEL_DELTA / EMIT_UNIT;
     }
 }

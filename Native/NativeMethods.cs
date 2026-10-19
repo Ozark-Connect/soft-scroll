@@ -48,13 +48,40 @@ internal static class NativeMethods
     internal static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
 
     [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
-    internal static extern IntPtr GetModuleHandle(string lpModuleName);
+    internal static extern IntPtr GetModuleHandle(string? lpModuleName);
+
+    // ── Message Loop (hook threads) ────────────────────────────────
+
+    internal const int WM_QUIT = 0x0012;
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct MSG
+    {
+        public IntPtr hwnd;
+        public uint message;
+        public IntPtr wParam;
+        public IntPtr lParam;
+        public uint time;
+        public POINT pt;
+    }
+
+    [DllImport("user32.dll")]
+    internal static extern int GetMessage(out MSG lpMsg, IntPtr hWnd, uint wMsgFilterMin, uint wMsgFilterMax);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool PostThreadMessage(uint idThread, int msg, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("kernel32.dll")]
+    internal static extern uint GetCurrentThreadId();
 
     // ── Input Injection ────────────────────────────────────────────
 
     internal const int INPUT_MOUSE = 0;
     internal const int INPUT_KEYBOARD = 1;
 
+    internal const int MOUSEEVENTF_MIDDLEDOWN = 0x0020;
+    internal const int MOUSEEVENTF_MIDDLEUP = 0x0040;
     internal const int MOUSEEVENTF_WHEEL = 0x0800;
     internal const int MOUSEEVENTF_HWHEEL = 0x01000;
     internal const int KEYEVENTF_KEYUP = 0x0002;
@@ -63,6 +90,25 @@ internal static class NativeMethods
     internal const ushort VK_CONTROL = 0x11;
     internal const ushort VK_SHIFT = 0x10;
     internal const ushort VK_MENU = 0x12;
+    internal const ushort VK_LWIN = 0x5B;
+    internal const ushort VK_RWIN = 0x5C;
+    internal const ushort VK_RMENU = 0xA5;
+
+    // Tags every event this app injects (dwExtraInfo) so the mouse hook skips only
+    // its own output and still smooths wheel events injected by other software
+    internal static readonly nint InjectionSignature = 0x53465343; // "SFSC"
+
+    internal static INPUT MouseInput(int flags, int mouseData = 0) => new()
+    {
+        type = INPUT_MOUSE,
+        U = new InputUnion { mi = new MOUSEINPUT { dwFlags = flags, mouseData = mouseData, dwExtraInfo = InjectionSignature } }
+    };
+
+    internal static INPUT KeyInput(ushort vk, int flags) => new()
+    {
+        type = INPUT_KEYBOARD,
+        U = new InputUnion { ki = new KEYBDINPUT { wVk = vk, dwFlags = flags, dwExtraInfo = InjectionSignature } }
+    };
 
     [StructLayout(LayoutKind.Sequential)]
     internal struct INPUT { public int type; public InputUnion U; }
@@ -125,6 +171,17 @@ internal static class NativeMethods
 
     [DllImport("user32.dll")]
     internal static extern IntPtr GetAncestor(IntPtr hwnd, uint gaFlags);
+
+    internal const int GWL_EXSTYLE = -20;
+    internal const int WS_EX_TRANSPARENT = 0x00000020;
+    internal const int WS_EX_TOOLWINDOW = 0x00000080;
+    internal const int WS_EX_NOACTIVATE = 0x08000000;
+
+    [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")]
+    internal static extern IntPtr GetWindowLongPtr(IntPtr hWnd, int nIndex);
+
+    [DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW")]
+    internal static extern IntPtr SetWindowLongPtr(IntPtr hWnd, int nIndex, IntPtr dwNewLong);
 
     // ── Timer Resolution ───────────────────────────────────────────
 
@@ -210,6 +267,17 @@ internal static class NativeMethods
     internal const int RIDI_DEVICENAME = 0x20000007;
     internal const int RIDI_DEVICEINFO = 0x2000000b;
     internal const int RID_INPUT = 0x10000003;
+    internal const int RID_HEADER = 0x10000005;
+
+    internal const uint RIDEV_INPUTSINK = 0x00000100;
+    internal const uint RIDEV_DEVNOTIFY = 0x00002000;
+    internal const int WM_INPUT_DEVICE_CHANGE = 0x00FE;
+
+    // HID usages: Generic Desktop / Mouse, Digitizer / Touch Pad (Precision Touchpad)
+    internal const ushort HID_USAGE_PAGE_GENERIC = 0x01;
+    internal const ushort HID_USAGE_GENERIC_MOUSE = 0x02;
+    internal const ushort HID_USAGE_PAGE_DIGITIZER = 0x0D;
+    internal const ushort HID_USAGE_DIGITIZER_TOUCH_PAD = 0x05;
 
     [StructLayout(LayoutKind.Sequential)]
     internal struct RAWINPUTDEVICELIST
@@ -242,16 +310,18 @@ internal static class NativeMethods
         [FieldOffset(0)] public RAWINPUTHID hid;
     }
 
-    [StructLayout(LayoutKind.Sequential)]
+    // RAWMOUSE: usButtonFlags/usButtonData share a 4-byte-aligned union with ulButtons
+    [StructLayout(LayoutKind.Explicit)]
     internal struct RAWINPUTMOUSE
     {
-        public ushort usFlags;
-        public ushort usButtonFlags;
-        public ushort usButtonData;
-        public uint ulRawButtons;
-        public int lLastX;
-        public int lLastY;
-        public uint ulExtraInformation;
+        [FieldOffset(0)] public ushort usFlags;
+        [FieldOffset(4)] public uint ulButtons;
+        [FieldOffset(4)] public ushort usButtonFlags;
+        [FieldOffset(6)] public ushort usButtonData;
+        [FieldOffset(8)] public uint ulRawButtons;
+        [FieldOffset(12)] public int lLastX;
+        [FieldOffset(16)] public int lLastY;
+        [FieldOffset(20)] public uint ulExtraInformation;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -280,14 +350,24 @@ internal static class NativeMethods
         public uint dwNumberOfButtons;
         public uint dwSampleRate;
         public uint fHasHorizontalWheel;
-        public uint fHasPen;
-        public uint fTouchPad;
     }
 
-    [StructLayout(LayoutKind.Explicit)]
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct RID_DEVICE_INFO_HID
+    {
+        public uint dwVendorId;
+        public uint dwProductId;
+        public uint dwVersionNumber;
+        public ushort usUsagePage;
+        public ushort usUsage;
+    }
+
+    // Size 24 = RID_DEVICE_INFO_KEYBOARD, the largest union member
+    [StructLayout(LayoutKind.Explicit, Size = 24)]
     internal struct RID_DEVICE_INFO_UNION
     {
         [FieldOffset(0)] public RID_DEVICE_INFO_MOUSE mouse;
+        [FieldOffset(0)] public RID_DEVICE_INFO_HID hid;
     }
 
     [StructLayout(LayoutKind.Sequential)]

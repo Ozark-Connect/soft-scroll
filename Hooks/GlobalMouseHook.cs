@@ -14,23 +14,24 @@ public sealed class MousePositionEventArgs : EventArgs
 {
     public int X { get; }
     public int Y { get; }
+    public bool Handled { get; set; }
     public MousePositionEventArgs(int x, int y) { X = x; Y = y; }
 }
 
-// Low-level mouse hook with ability to mark wheel events handled
+// Low-level mouse hook with ability to mark wheel events handled.
+// Events are raised on the hook thread, not the UI thread.
 public sealed class GlobalMouseHook : IDisposable
 {
-    private IntPtr _hook = IntPtr.Zero;
-    private NativeMethods.HookProc? _proc;
+    private readonly LowLevelHookThread _thread;
 
     private readonly KeyboardStateSampler _keyboard = new();
 
     // Track middle-click state to avoid firing MouseMoved on every normal mouse move
-
-    // Track middle-click state to avoid firing MouseMoved on every normal mouse move
     private volatile bool _middleClickActive;
+    // A swallowed middle-button down must have its matching up swallowed too
+    private bool _middleDownSwallowed;
 
-    public bool IsInstalled => _hook != IntPtr.Zero;
+    public bool IsInstalled => _thread.IsInstalled;
 
     /// <summary>
     /// When true, holding Shift will convert vertical scroll to horizontal.
@@ -38,28 +39,36 @@ public sealed class GlobalMouseHook : IDisposable
     public bool ShiftKeyHorizontal { get; set; } = true;
 
     public event EventHandler<MouseWheelEventArgs>? MouseWheel;
+    /// <summary>Horizontal wheel in WM_MOUSEHWHEEL convention (positive = right). Sender's
+    /// <see cref="LastHWheelFromShift"/> tells whether it came from Shift + vertical wheel.</summary>
     public event EventHandler<MouseWheelEventArgs>? MouseHWheel;
     public event EventHandler<MouseWheelEventArgs>? MouseZoomWheel;
     public event EventHandler<MousePositionEventArgs>? MiddleButtonDown;
-    public event EventHandler? MiddleButtonUp;
+    public event EventHandler<MousePositionEventArgs>? MiddleButtonUp;
     public event EventHandler<MousePositionEventArgs>? MouseMoved;
+
+    /// <summary>True while a MouseHWheel event raised from Shift + vertical wheel is being handled.</summary>
+    public bool LastHWheelFromShift { get; private set; }
+
+    public GlobalMouseHook()
+    {
+        _thread = new LowLevelHookThread(NativeMethods.WH_MOUSE_LL, "MouseHook", HookCallback);
+    }
 
     public void Install()
     {
         if (IsInstalled) return;
         _keyboard.Start();
-        _proc = HookCallback;
-        using var curProcess = System.Diagnostics.Process.GetCurrentProcess();
-        using var curModule = curProcess.MainModule!;
-        _hook = NativeMethods.SetWindowsHookEx(NativeMethods.WH_MOUSE_LL, _proc, NativeMethods.GetModuleHandle(curModule.ModuleName), 0);
+        _thread.Install();
     }
 
     public void Uninstall()
     {
         if (!IsInstalled) return;
-        NativeMethods.UnhookWindowsHookEx(_hook);
-        _hook = IntPtr.Zero;
+        _thread.Uninstall();
         _keyboard.Stop();
+        _middleClickActive = false;
+        _middleDownSwallowed = false;
     }
 
     private IntPtr HookCallback(int nCode, IntPtr wParam, IntPtr lParam)
@@ -69,8 +78,10 @@ public sealed class GlobalMouseHook : IDisposable
             var msg = wParam.ToInt32();
             var data = System.Runtime.InteropServices.Marshal.PtrToStructure<NativeMethods.MSLLHOOKSTRUCT>(lParam);
 
-            if ((data.flags & (NativeMethods.LLMHF_INJECTED | NativeMethods.LLMHF_LOWER_IL_INJECTED)) != 0)
-                return NativeMethods.CallNextHookEx(_hook, nCode, wParam, lParam);
+            // Skip only our own output; wheel events injected by other software
+            // (vendor mouse tools, remappers) are still smoothed
+            if (data.dwExtraInfo == NativeMethods.InjectionSignature)
+                return NativeMethods.CallNextHookEx(_thread.Handle, nCode, wParam, lParam);
 
             if (msg == NativeMethods.WM_MOUSEWHEEL)
             {
@@ -83,14 +94,13 @@ public sealed class GlobalMouseHook : IDisposable
                 }
                 else if (ShiftKeyHorizontal && _keyboard.IsShiftPressed)
                 {
-                    // Convert vertical wheel to horizontal: vertical wheel up (+) must
-                    // map to horizontal LEFT (Shift+MWHEEL convention). SendWheel inverts
-                    // hMouseData to compensate for the side-button HWHEEL convention
-                    // (positive = right), so we invert here too — otherwise the two
-                    // inversions cancel and Shift+wheel direction is reversed.
+                    // Convert to WM_MOUSEHWHEEL convention: Shift + wheel up (+) scrolls LEFT (-).
+                    // The engine flips it back when it re-emits Shift + vertical wheel.
                     // See GitHub issue #13.
                     var hArgs = new MouseWheelEventArgs(-delta);
+                    LastHWheelFromShift = true;
                     MouseHWheel?.Invoke(this, hArgs);
+                    LastHWheelFromShift = false;
                     if (hArgs.Handled)
                         args.Handled = true;
                 }
@@ -113,12 +123,21 @@ public sealed class GlobalMouseHook : IDisposable
             else if (msg == NativeMethods.WM_MBUTTONDOWN)
             {
                 _middleClickActive = true;
-                MiddleButtonDown?.Invoke(this, new MousePositionEventArgs(data.pt.x, data.pt.y));
+                var args = new MousePositionEventArgs(data.pt.x, data.pt.y);
+                MiddleButtonDown?.Invoke(this, args);
+                _middleDownSwallowed = args.Handled;
+                if (args.Handled)
+                    return (IntPtr)1;
             }
             else if (msg == NativeMethods.WM_MBUTTONUP)
             {
                 _middleClickActive = false;
-                MiddleButtonUp?.Invoke(this, EventArgs.Empty);
+                MiddleButtonUp?.Invoke(this, new MousePositionEventArgs(data.pt.x, data.pt.y));
+                if (_middleDownSwallowed)
+                {
+                    _middleDownSwallowed = false;
+                    return (IntPtr)1;
+                }
             }
             else if (msg == NativeMethods.WM_MOUSEMOVE)
             {
@@ -128,7 +147,7 @@ public sealed class GlobalMouseHook : IDisposable
                     MouseMoved?.Invoke(this, new MousePositionEventArgs(data.pt.x, data.pt.y));
             }
         }
-        return NativeMethods.CallNextHookEx(_hook, nCode, wParam, lParam);
+        return NativeMethods.CallNextHookEx(_thread.Handle, nCode, wParam, lParam);
     }
 
     public void Dispose() => Uninstall();

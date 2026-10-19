@@ -13,6 +13,7 @@
     <Window.Resources>
         <local:NullToVisibilityConverter x:Key="NullToVisibilityConverter"/>
         <local:VolumeConverter x:Key="VolumeConverter"/>
+        <local:EnumToStringConverter x:Key="EnumToStringConverter"/>
         <local:BoolToVisibilityConverter x:Key="BoolToVisibilityConverter"/>
         <local:InverseBoolToVisibilityConverter x:Key="InverseBoolToVisibilityConverter"/>
         <SolidColorBrush x:Key="BackgroundBrush" Color="#0A0A0B"/>
@@ -709,7 +710,7 @@
                                 <CheckBox x:Name="ChkShowScrollIndicator" IsChecked="{Binding ShowScrollIndicator}"/>
                                 <StackPanel Margin="0,12,0,0">
                                     <TextBlock x:Name="TxtIndicatorPositionLabel" FontSize="12" Foreground="{DynamicResource TextSecondaryBrush}" Margin="0,0,0,4"/>
-                                    <ComboBox x:Name="IndicatorPositionCombo" MinWidth="180" SelectedItem="{Binding IndicatorPosition}">
+                                    <ComboBox x:Name="IndicatorPositionCombo" MinWidth="180" SelectedValuePath="Tag" SelectedValue="{Binding IndicatorPosition, Converter={StaticResource EnumToStringConverter}}">
                                         <ComboBoxItem x:Name="PosTopRight" Content="Top Right" Tag="TopRight"/>
                                         <ComboBoxItem x:Name="PosTopLeft" Content="Top Left" Tag="TopLeft"/>
                                         <ComboBoxItem x:Name="PosBottomRight" Content="Bottom Right" Tag="BottomRight"/>
@@ -793,10 +794,10 @@
                                         </TextBlock>
                                     </StackPanel>
                                     <TextBlock x:Name="TxtSoundTypeLabel" FontSize="12" Foreground="{DynamicResource TextSecondaryBrush}" Margin="0,12,0,4"/>
-                                    <ComboBox x:Name="SoundTypeCombo" MinWidth="180" SelectedItem="{Binding ScrollSound}">
-                                        <ComboBoxItem x:Name="SoundSoftTick" Content="Soft Tick"/>
-                                        <ComboBoxItem x:Name="SoundClick" Content="Click"/>
-                                        <ComboBoxItem x:Name="SoundCustom" Content="Custom"/>
+                                    <ComboBox x:Name="SoundTypeCombo" MinWidth="180" SelectedValuePath="Tag" SelectedValue="{Binding ScrollSound, Converter={StaticResource EnumToStringConverter}}">
+                                        <ComboBoxItem x:Name="SoundSoftTick" Content="Soft Tick" Tag="SoftTick"/>
+                                        <ComboBoxItem x:Name="SoundClick" Content="Click" Tag="Click"/>
+                                        <ComboBoxItem x:Name="SoundCustom" Content="Custom" Tag="Custom"/>
                                     </ComboBox>
                                 </StackPanel>
                             </StackPanel>

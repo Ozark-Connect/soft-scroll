@@ -55,9 +55,13 @@ public class AppProfile
     public int MomentumFriction { get; set; } = 50;
     public bool Enabled { get; set; } = true;
 
-    public AppSettings ToAppSettings()
+    /// <summary>
+    /// Builds engine settings for this profile. Settings a profile does not store
+    /// (scroll direction) come from the global settings.
+    /// </summary>
+    public AppSettings ToAppSettings(AppSettings global)
     {
-        return new AppSettings
+        var s = new AppSettings
         {
             StepSizePx = StepSizePx,
             AnimationTimeMs = AnimationTimeMs,
@@ -67,8 +71,12 @@ public class AppProfile
             TailToHeadRatio = TailToHeadRatio,
             AnimationEasing = AnimationEasing,
             MomentumEnabled = MomentumEnabled,
-            MomentumFriction = MomentumFriction
+            MomentumFriction = MomentumFriction,
+            ReverseWheelDirection = global.ReverseWheelDirection,
+            Language = global.Language
         };
+        s.Clamp();
+        return s;
     }
 
     public static AppProfile FromAppSettings(string appName, string processName, AppSettings settings)

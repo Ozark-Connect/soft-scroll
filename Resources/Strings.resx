@@ -182,4 +182,11 @@
   <!-- Whitelist Mode -->
   <data name="WhitelistMode" xml:space="preserve"><value>Whitelist mode</value></data>
   <data name="WhitelistModeDesc" xml:space="preserve"><value>Only smooth scroll in the listed apps instead of excluding them. All other apps use native Windows scrolling.</value></data>
+  <!-- Add Application dialog -->
+  <data name="AddApplicationTitle" xml:space="preserve"><value>Add Application</value></data>
+  <data name="SelectApplicationToExclude" xml:space="preserve"><value>Select an application to exclude:</value></data>
+  <data name="Browse" xml:space="preserve"><value>Browse…</value></data>
+  <data name="Add" xml:space="preserve"><value>Add</value></data>
+  <data name="Cancel" xml:space="preserve"><value>Cancel</value></data>
+  <data name="SelectApplication" xml:space="preserve"><value>Select Application</value></data>
 </root>

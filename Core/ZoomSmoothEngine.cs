@@ -63,7 +63,7 @@ public sealed class ZoomSmoothEngine : IDisposable
                 bool workAvailable;
                 lock (_lock)
                 {
-                    workAvailable = Math.Abs(_remainingDelta) >= 0.1;
+                    workAvailable = Math.Abs(_remainingDelta) >= 0.1 || _unitAccum != 0;
                 }
 
                 if (!workAvailable)
@@ -102,101 +102,51 @@ public sealed class ZoomSmoothEngine : IDisposable
 
     private int Step(double dtMs)
     {
-        if (Math.Abs(_remainingDelta) < 0.1)
+        if (Math.Abs(_remainingDelta) >= 0.1)
         {
+            var t = Math.Min(1.0, dtMs / ZOOM_DURATION_MS);
+            var frac = 1.0 - Math.Pow(1.0 - t, 3); // CubicOut
+
+            var emit = _remainingDelta * frac;
+            _remainingDelta -= emit;
+            _unitAccum += emit / WHEEL_DELTA;
+        }
+
+        // Final frame: once less than half a zoom step is left, fold the leftover into the
+        // accumulator and round it, so a single Ctrl+wheel notch produces one zoom step
+        // within a few frames instead of waiting for the long tail
+        var finishing = Math.Abs(_remainingDelta) < WHEEL_DELTA / 2.0;
+        if (finishing)
+        {
+            _unitAccum += _remainingDelta / WHEEL_DELTA;
             _remainingDelta = 0;
+        }
+
+        var pulses = finishing ? (int)Math.Round(_unitAccum) : (int)_unitAccum;
+        var emitted = Math.Clamp(pulses, -5, 5);
+        _unitAccum -= emitted;
+        if (finishing && emitted == pulses)
             _unitAccum = 0;
-            return 0;
-        }
 
-        var t = Math.Min(1.0, dtMs / ZOOM_DURATION_MS);
-        var frac = 1.0 - Math.Pow(1.0 - t, 3); // CubicOut
-
-        var emit = _remainingDelta * frac;
-        _remainingDelta -= emit;
-
-        _unitAccum += emit / WHEEL_DELTA;
-
-        var pulses = 0;
-        if (Math.Abs(_unitAccum) >= 1.0)
-        {
-            pulses = (int)_unitAccum;
-            _unitAccum -= pulses;
-        }
-
-        if (pulses == 0) return 0;
-        return Math.Clamp(pulses, -5, 5) * WHEEL_DELTA;
+        return emitted * WHEEL_DELTA;
     }
 
     private static void EmitZoom(int mouseData)
     {
-        if (!NativeMethods.GetCursorPos(out var pt))
-        {
-            EmitZoomViaSendInput(mouseData);
-            return;
-        }
-
-        var hwnd = NativeMethods.WindowFromPoint(pt);
-        if (hwnd != IntPtr.Zero)
-        {
-            hwnd = NativeMethods.GetAncestor(hwnd, NativeMethods.GA_ROOT);
-            if (hwnd != IntPtr.Zero)
+        // SendInput routes the wheel to the control under the cursor like real input.
+        // Ctrl is normally still held by the user; inject Ctrl only if it was released
+        // mid-animation, so the user's own Ctrl key state is never overridden.
+        var ctrlHeld = (NativeMethods.GetAsyncKeyState(NativeMethods.VK_CONTROL) & 0x8000) != 0;
+        var inputs = ctrlHeld
+            ? new[] { NativeMethods.MouseInput(NativeMethods.MOUSEEVENTF_WHEEL, mouseData) }
+            : new[]
             {
-                var wParam = (IntPtr)((uint)mouseData << 16 | NativeMethods.MK_CONTROL);
-                var lParam = (IntPtr)((pt.y << 16) | (pt.x & 0xFFFF));
-                if (NativeMethods.PostMessageW(hwnd, NativeMethods.WM_MOUSEWHEEL, wParam, lParam) != IntPtr.Zero)
-                    return;
-            }
-        }
+                NativeMethods.KeyInput(NativeMethods.VK_CONTROL, 0),
+                NativeMethods.MouseInput(NativeMethods.MOUSEEVENTF_WHEEL, mouseData),
+                NativeMethods.KeyInput(NativeMethods.VK_CONTROL, NativeMethods.KEYEVENTF_KEYUP)
+            };
 
-        EmitZoomViaSendInput(mouseData);
-    }
-
-    private static void EmitZoomViaSendInput(int mouseData)
-    {
-        var size = Marshal.SizeOf<NativeMethods.INPUT>();
-
-        var inputs = new[]
-        {
-            new NativeMethods.INPUT
-            {
-                type = NativeMethods.INPUT_KEYBOARD,
-                U = new NativeMethods.InputUnion
-                {
-                    ki = new NativeMethods.KEYBDINPUT
-                    {
-                        wVk = NativeMethods.VK_CONTROL,
-                        dwFlags = 0
-                    }
-                }
-            },
-            new NativeMethods.INPUT
-            {
-                type = NativeMethods.INPUT_MOUSE,
-                U = new NativeMethods.InputUnion
-                {
-                    mi = new NativeMethods.MOUSEINPUT
-                    {
-                        dwFlags = NativeMethods.MOUSEEVENTF_WHEEL,
-                        mouseData = mouseData
-                    }
-                }
-            },
-            new NativeMethods.INPUT
-            {
-                type = NativeMethods.INPUT_KEYBOARD,
-                U = new NativeMethods.InputUnion
-                {
-                    ki = new NativeMethods.KEYBDINPUT
-                    {
-                        wVk = NativeMethods.VK_CONTROL,
-                        dwFlags = NativeMethods.KEYEVENTF_KEYUP
-                    }
-                }
-            }
-        };
-
-        NativeMethods.SendInput((uint)inputs.Length, inputs, size);
+        NativeMethods.SendInput((uint)inputs.Length, inputs, Marshal.SizeOf<NativeMethods.INPUT>());
     }
 
     public void Dispose() => Stop();

@@ -27,18 +27,31 @@ public class EasingCurveCanvas : Canvas
 
         if (DesignerProperties.GetIsInDesignMode(this)) return;
 
-        DataContextChanged += (_, _) =>
+        // The view model outlives every settings window; unsubscribe so a closed window can be collected
+        DataContextChanged += (_, e) =>
+        {
+            if (e.OldValue is SettingsViewModel oldVm) oldVm.PropertyChanged -= OnViewModelPropertyChanged;
+            if (e.NewValue is SettingsViewModel newVm && IsLoaded) newVm.PropertyChanged += OnViewModelPropertyChanged;
+            InvalidateVisual();
+        };
+        Loaded += (_, _) =>
         {
             if (DataContext is SettingsViewModel vm)
             {
-                vm.PropertyChanged += (_, e) =>
-                {
-                    if (e.PropertyName is "AnimationTimeMs" or "EasingMode" or "TailToHeadRatio" or "AnimationEasing")
-                        InvalidateVisual();
-                };
+                vm.PropertyChanged -= OnViewModelPropertyChanged;
+                vm.PropertyChanged += OnViewModelPropertyChanged;
             }
-            InvalidateVisual();
         };
+        Unloaded += (_, _) =>
+        {
+            if (DataContext is SettingsViewModel vm) vm.PropertyChanged -= OnViewModelPropertyChanged;
+        };
+    }
+
+    private void OnViewModelPropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName is "AnimationTimeMs" or "EasingMode" or "TailToHeadRatio" or "AnimationEasing")
+            InvalidateVisual();
     }
 
     protected override void OnRender(DrawingContext dc)

@@ -24,7 +24,8 @@ public partial class App : System.Windows.Application
     private SettingsWindow? _settingsWindow;
     private InputDeviceDetector? _inputDetector;
     private RawInputListener? _rawInputListener;
-    private AppSettings _settings = null!;
+    // Replaced on the UI thread, read by the hook thread
+    private volatile AppSettings _settings = null!;
 
     // Static event for device state changes - used by SettingsWindow to update UI
     public static event EventHandler<DeviceStateEventArgs>? DeviceStateChanged;
@@ -38,7 +39,9 @@ public partial class App : System.Windows.Application
     // Disable-while-held: track modifier keys and middle button state
     private readonly KeyboardStateSampler _disableKeysSampler = new();
     private volatile bool _middleButtonHeld;
-    private bool _disableWhileHoldingInitialized;
+
+    // Hook thread only: the current middle press was swallowed for middle-click scroll
+    private bool _middleClickSwallowed;
 
     protected override void OnStartup(StartupEventArgs e)
     {
@@ -58,17 +61,20 @@ public partial class App : System.Windows.Application
             _settings = snapshot;
             _engine?.ApplySettings(snapshot);
             _middleClickEngine?.UpdateDeadZone(snapshot.MiddleClickDeadZone);
+            _middleClickEngine?.UpdateInvertDirection(snapshot.MiddleClickConfig.InvertScrollDirection);
+            _scrollIndicator?.ApplySettings(snapshot.IndicatorPosition, snapshot.ScrollIndicatorDurationMs);
             if (_hook != null) _hook.ShiftKeyHorizontal = snapshot.ShiftKeyHorizontal;
+            UpdateDisableWhileHolding();
+            if (snapshot.AutoDisableOnTouchpad) _rawInputListener?.Initialize();
         };
 
-        _tray = new TrayIcon(_settings);
+        _tray = new TrayIcon(_settings.Enabled);
         _tray.OpenSettingsRequested += (_, _) => ShowSettingsWindow();
         _tray.ExitRequested += (_, _) => Shutdown();
         _tray.EnabledToggled += (_, enabled) =>
         {
             if (_vm is null) return;
-            _vm.Enabled = enabled;
-            _settings.Enabled = enabled;
+            _vm.Enabled = enabled; // raises SettingsChanged, which refreshes _settings
             _settings.Save();
             UpdateHookState();
         };
@@ -77,13 +83,18 @@ public partial class App : System.Windows.Application
         _engine = new SmoothScrollEngine(_settings);
         _zoomEngine = new ZoomSmoothEngine();
         _middleClickEngine = new MiddleClickScrollEngine();
+        _middleClickEngine.UpdateDeadZone(_settings.MiddleClickDeadZone);
+        _middleClickEngine.UpdateInvertDirection(_settings.MiddleClickConfig.InvertScrollDirection);
 
         _middleClickEngine.Activated += (x, y) =>
         {
             Dispatcher.InvokeAsync(() =>
             {
                 _middleClickOverlay ??= new MiddleClickOverlay();
-                _middleClickOverlay.ShowAt(x, y);
+                // GetCursorPos on the UI thread returns coordinates in the same DPI space as WPF;
+                // hook coordinates are physical and differ on mixed-DPI setups
+                var pos = GetCursorPosition();
+                _middleClickOverlay.ShowAt(pos.X, pos.Y);
             });
         };
         _middleClickEngine.Deactivated += () =>
@@ -92,7 +103,8 @@ public partial class App : System.Windows.Application
         };
         _middleClickEngine.DirectionChanged += (nx, ny, magnitude) =>
         {
-            _middleClickOverlay?.UpdateDirection(nx, ny, magnitude);
+            // Raised on the engine thread; the overlay is a WPF window
+            Dispatcher.InvokeAsync(() => _middleClickOverlay?.UpdateDirection(nx, ny, magnitude));
         };
 
         _hook = new GlobalMouseHook();
@@ -116,7 +128,7 @@ public partial class App : System.Windows.Application
         // Subscribe to devices changed event for re-enumeration
         _rawInputListener.DevicesChanged += (_, _) =>
         {
-            Dispatcher.InvokeAsync(() => UpdateDeviceStateUI(_inputDetector.ShouldDisableSmoothScroll(), _inputDetector.TouchpadCount, _inputDetector.MouseCount));
+            Dispatcher.InvokeAsync(() => UpdateDeviceStateUI(_inputDetector.LastEventFromTouchpad, _inputDetector.TouchpadCount, _inputDetector.MouseCount));
         };
 
         // Setup hotkey for quick toggle (Ctrl+Alt+S)
@@ -127,7 +139,7 @@ public partial class App : System.Windows.Application
                 modifiers: HotkeyConstants.MOD_CONTROL | HotkeyConstants.MOD_ALT | HotkeyConstants.MOD_NOREPEAT,
                 key: HotkeyConstants.VK_S
             );
-            _hotkey.HotkeyPressed += (_, _) => ToggleEnabled();
+            _hotkey.HotkeyPressed += (_, _) => Dispatcher.InvokeAsync(ToggleEnabled);
             _hotkey.Install();
         }
 
@@ -141,8 +153,6 @@ public partial class App : System.Windows.Application
             // Auto-disable on touchpad if setting is enabled
             if (_settings.AutoDisableOnTouchpad)
             {
-                // First check device state (fallback)
-                _inputDetector?.OnScrollEvent();
                 if (_inputDetector?.ShouldDisableSmoothScroll() == true)
                     return;
             }
@@ -157,19 +167,13 @@ public partial class App : System.Windows.Application
             string? procName;
             lock (_exclusionLock) { procName = _lastExcludedProcess; }
             var profile = _settings.GetAppProfile(procName ?? "");
+            ResetHorizontalCarryIfNeeded();
+            args.Handled = true;
             if (profile != null && profile.Enabled)
-            {
-                _lastScrollWasHorizontal = false;
-                // Apply app profile settings temporarily
-                _engine!.OnWheelWithSettings(args.Delta, profile.ToAppSettings());
-            }
+                _engine!.OnWheelWithSettings(args.Delta, profile.ToAppSettings(_settings));
             else
-            {
-                ResetHorizontalCarryIfNeeded();
-                args.Handled = true;
                 _engine!.OnWheel(args.Delta);
-                ScrollStatistics.Instance.RecordScroll(args.Delta);
-            }
+            ScrollStatistics.Instance.RecordScroll(args.Delta);
         };
         _hook.MouseHWheel += (_, args) =>
         {
@@ -181,8 +185,6 @@ public partial class App : System.Windows.Application
             // Auto-disable on touchpad if setting is enabled
             if (_settings.AutoDisableOnTouchpad)
             {
-                // First check device state (fallback)
-                _inputDetector?.OnScrollEvent();
                 if (_inputDetector?.ShouldDisableSmoothScroll() == true)
                     return;
             }
@@ -195,7 +197,7 @@ public partial class App : System.Windows.Application
 
             args.Handled = true;
             _lastScrollWasHorizontal = true;
-            _engine!.OnHWheel(args.Delta);
+            _engine!.OnHWheel(args.Delta, _hook.LastHWheelFromShift);
             ScrollStatistics.Instance.RecordScroll(args.Delta);
         };
         _hook.MouseZoomWheel += (_, args) =>
@@ -211,13 +213,27 @@ public partial class App : System.Windows.Application
         };
         _hook.MiddleButtonDown += (_, args) =>
         {
+            _middleButtonHeld = true;
+            _middleClickSwallowed = false;
             if (!_settings.Enabled || !_settings.MiddleClickScroll) return;
+            if (IsExcludedApp()) return;
+            if (IsOwnWindow()) return;
+
+            // Swallow the press so the target app does not also start its own
+            // autoscroll or open a link; a press without scrolling is replayed on release
+            args.Handled = true;
+            _middleClickSwallowed = true;
             _middleClickEngine!.OnMiddleDown(args.X, args.Y);
         };
         _hook.MiddleButtonUp += (_, _) =>
         {
-            if (!_settings.MiddleClickScroll) return;
-            _middleClickEngine!.OnMiddleUp();
+            _middleButtonHeld = false;
+            if (!_middleClickSwallowed) return;
+            _middleClickSwallowed = false;
+
+            var scrolled = _middleClickEngine!.OnMiddleUp();
+            if (!scrolled)
+                System.Threading.ThreadPool.QueueUserWorkItem(_ => MiddleClickScrollEngine.ReplayMiddleClick());
         };
         _hook.MouseMoved += (_, args) =>
         {
@@ -239,18 +255,11 @@ public partial class App : System.Windows.Application
             Log.Information("Starting minimized to system tray");
         }
 
-        // Ensure Raw Input listener initializes on the UI thread after window creation
+        // Enumerate devices first so the first raw input can be classified, then register.
+        // The listener owns its own hidden window, so it works when starting minimized too.
+        _inputDetector.EnumerateDevices();
         if (_settings.AutoDisableOnTouchpad)
-        {
-            Dispatcher.InvokeAsync(() =>
-            {
-                if (_settingsWindow != null)
-                    _rawInputListener?.Initialize(_settingsWindow);
-            });
-        }
-
-        // Enumerate devices after Raw Input is registered
-        Dispatcher.InvokeAsync(() => _inputDetector?.EnumerateDevices());
+            _rawInputListener.Initialize();
 
         Current.MainWindow = _settingsWindow;
     }
@@ -279,9 +288,14 @@ public partial class App : System.Windows.Application
     private const long OWN_WINDOW_CHECK_MS = 50;
     private readonly int _ownProcessId = Environment.ProcessId;
     private bool _isOwnWindow;
-    private IntPtr _lastForegroundWindow;
+    private IntPtr _lastWindowUnderCursor;
     private long _lastOwnWindowCheck;
 
+    /// <summary>
+    /// True when the window under the cursor belongs to Soft Scroll. Wheel input goes to the
+    /// window under the cursor, not the foreground window, so testing focus would turn off
+    /// smoothing for every app while the settings window is focused.
+    /// </summary>
     private bool IsOwnWindow()
     {
         var now = Environment.TickCount64;
@@ -289,11 +303,16 @@ public partial class App : System.Windows.Application
             return _isOwnWindow;
         _lastOwnWindowCheck = now;
 
-        IntPtr hwnd = NativeMethods.GetForegroundWindow();
-        if (hwnd == _lastForegroundWindow)
+        if (!NativeMethods.GetCursorPos(out var pt))
             return _isOwnWindow;
 
-        _lastForegroundWindow = hwnd;
+        IntPtr hwnd = NativeMethods.WindowFromPoint(pt);
+        if (hwnd != IntPtr.Zero)
+            hwnd = NativeMethods.GetAncestor(hwnd, NativeMethods.GA_ROOT);
+        if (hwnd == _lastWindowUnderCursor)
+            return _isOwnWindow;
+
+        _lastWindowUnderCursor = hwnd;
         if (hwnd == IntPtr.Zero)
         {
             _isOwnWindow = false;
@@ -318,28 +337,21 @@ public partial class App : System.Windows.Application
         return _settings.IsExcluded(_lastExcludedProcess);
     }
 
-    private void InitializeDisableWhileHolding()
+    /// <summary>
+    /// Runs the modifier sampler only while a disable-while-holding key is configured.
+    /// Called on every settings change, so keys checked at runtime take effect at once.
+    /// The middle button state is tracked by the hook handlers unconditionally.
+    /// </summary>
+    private void UpdateDisableWhileHolding()
     {
-        if (_disableWhileHoldingInitialized) return;
-        _disableWhileHoldingInitialized = true;
-
-        var hasKeys = _settings.DisableWhileHoldingKeys.Count > 0;
-        var hasMiddle = _settings.DisableWhileHoldingMiddleButton;
-        if (!hasKeys && !hasMiddle) return;
-
-        _disableKeysSampler.Start();
-
-        if (hasMiddle)
-        {
-            _hook!.MiddleButtonDown += (_, _) => { _middleButtonHeld = true; };
-            _hook!.MiddleButtonUp += (_, _) => { _middleButtonHeld = false; };
-        }
+        if (_settings.Enabled && _settings.DisableWhileHoldingKeys.Count > 0)
+            _disableKeysSampler.Start();
+        else
+            _disableKeysSampler.Stop();
     }
 
     private bool IsDisabledByHold()
     {
-        if (!_disableWhileHoldingInitialized) return false;
-
         foreach (var key in _settings.DisableWhileHoldingKeys)
         {
             var vk = key.ToUpperInvariant();
@@ -362,7 +374,11 @@ public partial class App : System.Windows.Application
     {
         Dispatcher.InvokeAsync(() =>
         {
-            _scrollIndicator ??= new ScrollIndicator();
+            if (_scrollIndicator == null)
+            {
+                _scrollIndicator = new ScrollIndicator();
+                _scrollIndicator.ApplySettings(_settings.IndicatorPosition, _settings.ScrollIndicatorDurationMs);
+            }
             var pos = GetCursorPosition();
             _scrollIndicator.UpdateSpeed(speed);
             if (!_scrollIndicator.IsVisible)
@@ -390,7 +406,6 @@ public partial class App : System.Windows.Application
             _zoomEngine?.Start();
             _middleClickEngine?.Start();
             _hook.Install();
-            InitializeDisableWhileHolding();
         }
         else
         {
@@ -399,7 +414,10 @@ public partial class App : System.Windows.Application
             _zoomEngine?.Stop();
             _middleClickEngine?.Stop();
             _middleClickEngine?.OnMiddleUp();
+            // The hook thread has exited; a press in progress must not replay a click after re-enable
+            _middleClickSwallowed = false;
         }
+        UpdateDisableWhileHolding();
     }
 
     protected override void OnExit(ExitEventArgs e)
