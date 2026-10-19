@@ -124,9 +124,8 @@ public sealed class ZoomSmoothEngine : IDisposable
 
         var pulses = finishing ? (int)Math.Round(_unitAccum) : (int)_unitAccum;
         var emitted = Math.Clamp(pulses, -5, 5);
-        _unitAccum -= emitted;
-        if (finishing && emitted == pulses)
-            _unitAccum = 0;
+        // The clamp is a speed limit: steps above it are dropped, not queued for later frames
+        _unitAccum = finishing ? 0 : _unitAccum - pulses;
 
         return emitted * WHEEL_DELTA;
     }

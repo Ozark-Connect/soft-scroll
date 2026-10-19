@@ -298,17 +298,22 @@ public sealed class SmoothScrollEngine : IDisposable
         private double _accelNotches;
 
         // Momentum fields
-        public double Velocity;       // px/ms
+        public double Velocity;       // px/ms, only while InMomentum
         public bool InMomentum;
-        private double _momentumAccum;
+        // Notches in the current flick (each within FLING_NOTCH_MS of the previous one)
+        private int _flingNotches;
+
+        // A gesture glides only if it was a flick: at least two quick notches
+        private const int FLING_NOTCH_MS = 150;
+        // Glide takes over this long after the last notch
+        private const int MOMENTUM_HANDOFF_MS = 80;
+        private const double MOMENTUM_STOP_PX_PER_MS = 0.02;
 
         public bool HasWork(AppSettings global)
         {
-            var s = Profile ?? global;
             return Math.Abs(RemainingPx) >= 0.1
                 || UnitAccum != 0
-                || InMomentum
-                || (s.MomentumEnabled && Math.Abs(Velocity) > 0.05);
+                || InMomentum;
         }
 
         public void RegisterNotch(long nowMs, int delta, AppSettings s)
@@ -318,8 +323,9 @@ public sealed class SmoothScrollEngine : IDisposable
             {
                 InMomentum = false;
                 Velocity = 0;
-                _momentumAccum = 0;
             }
+
+            _flingNotches = nowMs - LastNotchTime <= FLING_NOTCH_MS ? _flingNotches + 1 : 1;
 
             if (nowMs - LastNotchTime <= s.AccelerationDeltaMs)
                 _accelNotches += Math.Abs(delta) / (double)WHEEL_DELTA;
@@ -327,73 +333,57 @@ public sealed class SmoothScrollEngine : IDisposable
                 _accelNotches = 0;
             AccelFactor = Math.Clamp(1 + (int)_accelNotches, 1, Math.Max(1, s.AccelerationMax));
 
-            var timeSinceLast = nowMs - LastNotchTime;
             LastNotchTime = nowMs;
 
             var notches = delta / (double)WHEEL_DELTA;
             var pixels = notches * s.StepSizePx * AccelFactor;
             RemainingPx += pixels;
-
-            // Track velocity for momentum
-            if (s.MomentumEnabled && timeSinceLast > 0 && timeSinceLast < 500)
-            {
-                Velocity = pixels / timeSinceLast;
-            }
-            else
-            {
-                // A slow notch must not inherit the previous gesture's velocity
-                Velocity = 0;
-            }
         }
 
         public int Step(double dtMs, AppSettings global)
         {
             var s = Profile ?? global;
+            var duration = Math.Max(1.0, s.AnimationTimeMs);
+            // Friction: higher value = stops faster. Scale 0-100 to 0.001-0.02 per ms
+            var friction = 0.001 + (s.MomentumFriction / 100.0) * 0.019;
 
-            // Momentum without the setting (e.g. turned off mid-gesture) must not keep the worker busy
-            if (!s.MomentumEnabled && !InMomentum)
-                Velocity = 0;
-
-            // Momentum phase: if normal scroll finished and velocity is significant
-            if (s.MomentumEnabled && !InMomentum && Math.Abs(RemainingPx) < 0.1 && UnitAccum == 0 && Math.Abs(Velocity) > 0.05)
+            if (InMomentum && !s.MomentumEnabled)
             {
-                var elapsed = Environment.TickCount64 - LastNotchTime;
-                if (elapsed > 80) // Wait a short moment after last notch
+                InMomentum = false;
+                Velocity = 0;
+            }
+
+            // Momentum hand-off: shortly after the last notch of a flick, the glide takes over
+            // at the speed the animation is moving right now, so there is no stop and restart.
+            // It only takes over if the glide would travel further than the animation has left.
+            if (s.MomentumEnabled && !InMomentum && _flingNotches >= 2 && Math.Abs(RemainingPx) >= 0.1
+                && Environment.TickCount64 - LastNotchTime > MOMENTUM_HANDOFF_MS)
+            {
+                var frac = ComputeEasingFraction(dtMs, duration, s.EasingMode, s.TailToHeadRatio, s.AnimationEasing);
+                var velocity = RemainingPx * frac / dtMs;
+                var glidePx = velocity / -Math.Log(1.0 - friction);
+                if (Math.Abs(glidePx) > Math.Abs(RemainingPx))
                 {
+                    Velocity = velocity;
+                    RemainingPx = 0;
                     InMomentum = true;
                 }
+                _flingNotches = 0; // decide once per gesture
             }
 
             if (InMomentum)
             {
-                // Friction: higher value = stops faster. Scale 0-100 to 0.001-0.02
-                var friction = 0.001 + (s.MomentumFriction / 100.0) * 0.019;
+                UnitAccum += PxToUnits(Velocity * dtMs);
                 Velocity *= Math.Pow(1.0 - friction, dtMs);
-
-                if (Math.Abs(Velocity) < 0.02)
+                if (Math.Abs(Velocity) < MOMENTUM_STOP_PX_PER_MS)
                 {
                     InMomentum = false;
                     Velocity = 0;
-                    _momentumAccum = 0;
-                    return 0;
                 }
-
-                var momentumPx = Velocity * dtMs;
-                var wheelUnits = (momentumPx / BASE_STEP_PX) * WHEEL_DELTA;
-                _momentumAccum += wheelUnits / EMIT_UNIT;
-
-                var mPulses = (int)_momentumAccum;
-                if (mPulses == 0) return 0;
-                // Pulses above the per-frame clamp stay in the accumulator for the next frame
-                mPulses = Math.Clamp(mPulses, PULSE_CLAMP_MIN, PULSE_CLAMP_MAX);
-                _momentumAccum -= mPulses;
-                return mPulses * EMIT_UNIT;
             }
-
-            // Normal smooth scroll
-            if (Math.Abs(RemainingPx) >= 0.1)
+            else if (Math.Abs(RemainingPx) >= 0.1)
             {
-                var duration = Math.Max(1.0, s.AnimationTimeMs);
+                // Normal smooth scroll
                 var frac = ComputeEasingFraction(dtMs, duration, s.EasingMode, s.TailToHeadRatio, s.AnimationEasing);
 
                 var emitPx = RemainingPx * frac;
@@ -404,7 +394,7 @@ public sealed class SmoothScrollEngine : IDisposable
             // Final frame: once less than half a pulse is left, fold the leftover distance into the
             // accumulator and round it. The gesture emits its full wheel distance, and the last
             // pulse is not held back for the long exponential tail.
-            var finishing = Math.Abs(PxToUnits(RemainingPx)) < 0.5;
+            var finishing = !InMomentum && Math.Abs(PxToUnits(RemainingPx)) < 0.5;
             if (finishing)
             {
                 UnitAccum += PxToUnits(RemainingPx);
@@ -413,10 +403,9 @@ public sealed class SmoothScrollEngine : IDisposable
 
             var pulses = finishing ? (int)Math.Round(UnitAccum) : (int)UnitAccum;
             var emitted = Math.Clamp(pulses, PULSE_CLAMP_MIN, PULSE_CLAMP_MAX);
-            // Pulses above the per-frame clamp stay in the accumulator for the next frame
-            UnitAccum -= emitted;
-            if (finishing && emitted == pulses)
-                UnitAccum = 0;
+            // The per-frame clamp is a speed limit: pulses above it are dropped, not queued.
+            // Queuing them made scrolling continue at full speed after the wheel stopped.
+            UnitAccum = finishing ? 0 : UnitAccum - pulses;
 
             return emitted * EMIT_UNIT;
         }
