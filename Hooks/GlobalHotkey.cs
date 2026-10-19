@@ -9,6 +9,8 @@ public sealed class GlobalHotkey : IDisposable
     private const int WH_KEYBOARD_LL = 13;
     private const int WM_KEYDOWN = 0x0100;
     private const int WM_SYSKEYDOWN = 0x0104;
+    private const int WM_KEYUP = 0x0101;
+    private const int WM_SYSKEYUP = 0x0105;
 
     private IntPtr _hook = IntPtr.Zero;
     private NativeMethods.HookProc? _proc;
@@ -16,6 +18,7 @@ public sealed class GlobalHotkey : IDisposable
     private readonly uint _modifiers;
     private readonly ushort _key;
     private volatile bool _enabled = true;
+    private bool _keyHeld;
 
     public event EventHandler? HotkeyPressed;
 
@@ -50,10 +53,15 @@ public sealed class GlobalHotkey : IDisposable
         if (nCode >= 0 && _enabled)
         {
             var msg = wParam.ToInt32();
-            if (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN)
+            // lParam points to a KBDLLHOOKSTRUCT; vkCode is its first DWORD
+            var vk = (ushort)Marshal.ReadInt32(lParam);
+
+            if ((msg == WM_KEYUP || msg == WM_SYSKEYUP) && vk == _key)
             {
-                // lParam points to a KBDLLHOOKSTRUCT; vkCode is its first DWORD
-                var vk = (ushort)Marshal.ReadInt32(lParam);
+                _keyHeld = false;
+            }
+            else if (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN)
+            {
 
                 bool ctrl = (NativeMethods.GetAsyncKeyState(NativeMethods.VK_CONTROL) & 0x8000) != 0;
                 bool shift = (NativeMethods.GetAsyncKeyState(NativeMethods.VK_SHIFT) & 0x8000) != 0;
@@ -68,7 +76,13 @@ public sealed class GlobalHotkey : IDisposable
                     shift == modShift &&
                     alt == modAlt)
                 {
-                    HotkeyPressed?.Invoke(this, EventArgs.Empty);
+                    // Key autorepeat sends repeated keydowns; MOD_NOREPEAT fires once per press
+                    bool noRepeat = (_modifiers & HotkeyConstants.MOD_NOREPEAT) != 0;
+                    if (!(noRepeat && _keyHeld))
+                    {
+                        _keyHeld = true;
+                        HotkeyPressed?.Invoke(this, EventArgs.Empty);
+                    }
                     return (IntPtr)1;
                 }
             }
