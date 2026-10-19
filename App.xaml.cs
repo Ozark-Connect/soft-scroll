@@ -79,7 +79,9 @@ public partial class App : System.Windows.Application
 
         base.OnStartup(e);
 
+        bool firstRun = !System.IO.File.Exists(AppSettings.GetConfigPath());
         _settings = AppSettings.Load();
+        if (firstRun) _settings.Save(); // later launches are no longer first runs
         _vm = new SettingsViewModel(_settings);
         _vm.SettingsChanged += (_, _) =>
         {
@@ -270,7 +272,9 @@ public partial class App : System.Windows.Application
 
         UpdateHookState();
 
-        bool shouldStartMinimized = _settings.StartWithWindows && _settings.StartMinimized;
+        // Start in the tray whenever "Start minimized" is on, not only when launched at sign-in.
+        // First run (no settings file yet) still shows the window so the user finds the app.
+        bool shouldStartMinimized = _settings.StartMinimized && !firstRun;
 
         if (!shouldStartMinimized)
         {
