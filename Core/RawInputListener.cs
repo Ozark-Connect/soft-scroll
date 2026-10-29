@@ -163,6 +163,21 @@ public sealed class RawInputListener : IDisposable
             var header = Marshal.PtrToStructure<NativeMethods.RAWINPUTHEADER>(data);
             if (header.dwType == NativeMethods.RIM_TYPEMOUSE || header.dwType == NativeMethods.RIM_TYPEHID)
                 _deviceDetector.ProcessRawInput(header.hDevice);
+
+            // TEMPORARY wheel diagnostics. hDevice 0 is injected input (our own SendInput).
+            if (header.dwType == NativeMethods.RIM_TYPEMOUSE && header.hDevice != IntPtr.Zero)
+            {
+                uint fullSize = 0;
+                NativeMethods.GetRawInputData(lParam, NativeMethods.RID_INPUT, IntPtr.Zero, ref fullSize, headerSize);
+                var full = GetOrCreateBuffer((int)fullSize);
+                if (full != IntPtr.Zero && NativeMethods.GetRawInputData(lParam, NativeMethods.RID_INPUT, full, ref fullSize, headerSize) == fullSize)
+                {
+                    var raw = Marshal.PtrToStructure<NativeMethods.RAWINPUT>(full);
+                    const ushort RI_MOUSE_WHEEL = 0x0400;
+                    if ((raw.data.mouse.usButtonFlags & RI_MOUSE_WHEEL) != 0)
+                        WheelDiagnostics.Raw((short)raw.data.mouse.usButtonData);
+                }
+            }
         }
         catch (Exception ex)
         {

@@ -43,6 +43,9 @@ public sealed class SmoothScrollEngine : IDisposable
     private double _targetFrameMs = 1000.0 / 120; // default 120fps for new instances
     private long _lastWorkTime;
 
+    // Stacked glide speed limit: the per-frame pulse cap at the active frame rate. Faster pulses are dropped anyway.
+    private double MaxGlidePxPerMs => PULSE_CLAMP_MAX * EMIT_UNIT / (double)WHEEL_DELTA * BASE_STEP_PX / _targetFrameMs;
+
     private const double SPIN_WAIT_COUNT = 10;
     private const int IDLE_TIMEOUT_MS = 2000; // drop to 60fps after 2s idle
 
@@ -115,8 +118,11 @@ public sealed class SmoothScrollEngine : IDisposable
             var s = profile ?? _s;
             var dir = s.ReverseWheelDirection ? -1 : 1;
             var now = Environment.TickCount64;
+            var root = RootUnderCursor();
+            if (_v.TargetRoot != root) _v = new() { TargetRoot = root };
             _v.Profile = profile;
-            _v.RegisterNotch(now, delta * dir, s);
+            _v.Modifiers = HeldModifiers();
+            _v.RegisterNotch(now, delta * dir, s, MaxGlidePxPerMs);
             _lastAxis = ScrollAxis.Vertical;
         }
         _signal.Set();
@@ -137,9 +143,12 @@ public sealed class SmoothScrollEngine : IDisposable
             // No ReverseWheelDirection for horizontal: scrolling right (positive delta)
             // must always mean "scroll right" per Windows convention.
             var now = Environment.TickCount64;
+            var root = RootUnderCursor();
+            if (_h.TargetRoot != root) _h = new() { TargetRoot = root };
             _h.Profile = null;
             _h.FromShiftWheel = fromShiftWheel;
-            _h.RegisterNotch(now, delta, _s);
+            _h.Modifiers = HeldModifiers();
+            _h.RegisterNotch(now, delta, _s, MaxGlidePxPerMs);
             _lastAxis = ScrollAxis.Horizontal;
         }
         _signal.Set();
@@ -167,6 +176,7 @@ public sealed class SmoothScrollEngine : IDisposable
 
                 if (!workAvailable)
                 {
+                    WheelDiagnostics.GestureEnded();
                     // Block until a wheel event signals us or timeout elapses.
                     // Timeout guarantees eventual shutdown even if no signal arrives.
                     _signal.Wait(TimeSpan.FromMilliseconds(100));
@@ -184,10 +194,21 @@ public sealed class SmoothScrollEngine : IDisposable
 
                 // Adaptive frame rate computation
                 var frameMs = ComputeAdaptiveFrameMs(remainingTotal);
+                var root = RootUnderCursor();
+                var modifiers = HeldModifiers();
 
                 int outV = 0, outH = 0;
                 lock (_lock)
                 {
+                    // Cursor moved to another window, or another app came to the front under it
+                    if (_v.TargetRoot != root) _v = new();
+                    if (_h.TargetRoot != root) _h = new();
+
+                    // A modifier pressed after the last notch stops the scroll. Wheel pulses sent while
+                    // it is down become Alt+wheel (browser back/forward), Ctrl+wheel (zoom) or Shift+wheel.
+                    if ((modifiers & ~_v.Modifiers) != 0) _v = new();
+                    if ((modifiers & ~_h.Modifiers) != 0) _h = new();
+
                     outV = _v.Step(dt, _s);
                     if (_s.HorizontalSmoothness) outH = _h.Step(dt, _s);
                     else { outH = 0; _h = new(); } // setting turned off mid-animation: drop it, or the worker never idles
@@ -265,6 +286,24 @@ public sealed class SmoothScrollEngine : IDisposable
             NativeMethods.SendInput(count, inputs, Marshal.SizeOf<NativeMethods.INPUT>());
     }
 
+    private static IntPtr RootUnderCursor()
+    {
+        if (!NativeMethods.GetCursorPos(out var pt)) return IntPtr.Zero;
+        var hwnd = NativeMethods.WindowFromPoint(pt);
+        return hwnd == IntPtr.Zero ? IntPtr.Zero : NativeMethods.GetAncestor(hwnd, NativeMethods.GA_ROOT);
+    }
+
+    private const int MOD_SHIFT = 1, MOD_CTRL = 2, MOD_ALT = 4, MOD_WIN = 8;
+
+    private static int HeldModifiers()
+    {
+        static bool Down(ushort vk) => (NativeMethods.GetAsyncKeyState(vk) & 0x8000) != 0;
+        return (Down(NativeMethods.VK_SHIFT) ? MOD_SHIFT : 0)
+            | (Down(NativeMethods.VK_CONTROL) ? MOD_CTRL : 0)
+            | (Down(NativeMethods.VK_MENU) ? MOD_ALT : 0)
+            | (Down(NativeMethods.VK_LWIN) || Down(NativeMethods.VK_RWIN) ? MOD_WIN : 0);
+    }
+
     public void ResetHorizontalAxis()
     {
         lock (_lock)
@@ -301,8 +340,13 @@ public sealed class SmoothScrollEngine : IDisposable
 
         // Settings of the app profile that started this animation; null = global settings
         public AppSettings? Profile;
+        // Top-level window under the cursor at the last notch. Output follows the cursor,
+        // so the scroll stops when this changes rather than carrying into another app.
+        public IntPtr TargetRoot;
         // Horizontal axis only: input came from Shift + vertical wheel
         public bool FromShiftWheel;
+        // Modifier keys held at the last notch (MOD_* flags)
+        public int Modifiers;
 
         // Acceleration counts full notches (120 units), not events, so hi-res wheels
         // and touchpads that send many small deltas do not hit max acceleration instantly
@@ -317,8 +361,11 @@ public sealed class SmoothScrollEngine : IDisposable
         // A gesture glides only if it was a flick: at least two quick notches
         private const int FLING_NOTCH_MS = 150;
         // Glide takes over this long after the last notch
-        private const int MOMENTUM_HANDOFF_MS = 80;
+        private const int MOMENTUM_HANDOFF_MS = 30;
         private const double MOMENTUM_STOP_PX_PER_MS = 0.02;
+        // Carried-over acceleration fades with this time constant during a pause between flicks
+        private const double ACCEL_DECAY_MS = 400;
+        private const double GLIDE_STACK_GAIN = 0.5;
 
         public bool HasWork(AppSettings global)
         {
@@ -327,19 +374,34 @@ public sealed class SmoothScrollEngine : IDisposable
                 || InMomentum;
         }
 
-        public void RegisterNotch(long nowMs, int delta, AppSettings s)
+        public void RegisterNotch(long nowMs, int delta, AppSettings s, double maxGlidePxPerMs)
         {
-            // Cancel momentum on new user input
-            if (InMomentum)
+            var gap = nowMs - LastNotchTime;
+            var moving = InMomentum || Math.Abs(RemainingPx) >= 0.1;
+            var movingSign = InMomentum ? Math.Sign(Velocity) : Math.Sign(RemainingPx);
+            var continuing = moving && movingSign == Math.Sign(delta);
+
+            if (moving && !continuing)
             {
+                // Reverse input stops the scroll dead, as on macOS, and starts a fresh gesture
+                var f = FrictionPerMs(s);
+                WheelDiagnostics.ReverseStop(Math.Abs(RemainingPx) + (InMomentum ? Math.Abs(Velocity) / -Math.Log(1.0 - f) : 0), gap, delta);
                 InMomentum = false;
                 Velocity = 0;
+                RemainingPx = 0;
+                UnitAccum = 0;
+                _accelNotches = 0;
+                _flingNotches = 0;
             }
 
-            _flingNotches = nowMs - LastNotchTime <= FLING_NOTCH_MS ? _flingNotches + 1 : 1;
+            // A notch while the scroll is still moving the same way continues the gesture:
+            // the flick count and acceleration carry over the pause between flicks
+            _flingNotches = gap <= FLING_NOTCH_MS || continuing ? _flingNotches + 1 : 1;
 
-            if (nowMs - LastNotchTime <= s.AccelerationDeltaMs)
+            if (gap <= s.AccelerationDeltaMs)
                 _accelNotches += Math.Abs(delta) / (double)WHEEL_DELTA;
+            else if (continuing)
+                _accelNotches *= Math.Exp(-(gap - s.AccelerationDeltaMs) / ACCEL_DECAY_MS);
             else
                 _accelNotches = 0;
             AccelFactor = Math.Clamp(1 + (int)_accelNotches, 1, Math.Max(1, s.AccelerationMax));
@@ -348,15 +410,36 @@ public sealed class SmoothScrollEngine : IDisposable
 
             var notches = delta / (double)WHEEL_DELTA;
             var pixels = notches * s.StepSizePx * AccelFactor;
-            RemainingPx += pixels;
+            WheelDiagnostics.Requested(Math.Abs(pixels));
+            WheelDiagnostics.Notch(delta, gap, AccelFactor, InMomentum, Velocity, RemainingPx);
+
+            if (InMomentum)
+            {
+                // Stack onto the glide: add the speed this notch gives the eased animation from rest
+                // (its first-millisecond fraction), so repeated flicks compound as on macOS.
+                // GLIDE_STACK_GAIN scales the accelerated distance so a flick during a glide adds
+                // about the speed the same flick hands off from rest.
+                var friction = FrictionPerMs(s);
+                var k = -Math.Log(1.0 - friction);
+                var rate = ComputeEasingFraction(1.0, Math.Max(1.0, s.AnimationTimeMs), s.EasingMode, s.TailToHeadRatio, s.AnimationEasing);
+                var unclamped = Velocity + pixels * GLIDE_STACK_GAIN * rate;
+                // The cap limits gain only: a same-direction notch never slows a glide that is
+                // already faster (the hand-off can start above the cap)
+                var limit = Math.Max(maxGlidePxPerMs, Math.Abs(Velocity));
+                Velocity = Math.Clamp(unclamped, -limit, limit);
+                WheelDiagnostics.VelocityCapLost(Math.Abs(unclamped - Velocity) / k);
+            }
+            else
+            {
+                RemainingPx += pixels;
+            }
         }
 
         public int Step(double dtMs, AppSettings global)
         {
             var s = Profile ?? global;
             var duration = Math.Max(1.0, s.AnimationTimeMs);
-            // Friction: higher value = stops faster. Scale 0-100 to 0.001-0.02 per ms
-            var friction = 0.001 + (s.MomentumFriction / 100.0) * 0.019;
+            var friction = FrictionPerMs(s);
 
             if (InMomentum && !s.MomentumEnabled)
             {
@@ -417,10 +500,17 @@ public sealed class SmoothScrollEngine : IDisposable
             // The per-frame clamp is a speed limit: pulses above it are dropped, not queued.
             // Queuing them made scrolling continue at full speed after the wheel stopped.
             UnitAccum = finishing ? 0 : UnitAccum - pulses;
+            WheelDiagnostics.ClampDropped(UnitsToPx(Math.Abs(pulses - emitted)));
+            WheelDiagnostics.Emitted(UnitsToPx(Math.Abs(emitted)));
 
             return emitted * EMIT_UNIT;
         }
 
         private static double PxToUnits(double px) => px / BASE_STEP_PX * WHEEL_DELTA / EMIT_UNIT;
+        private static double UnitsToPx(double units) => units * EMIT_UNIT / WHEEL_DELTA * BASE_STEP_PX;
+
+        // Glide friction: higher value = stops faster. Scale 0-100 to 0.001-0.006 per ms.
+        // 50 gives 0.0035 per ms (time constant about 285 ms).
+        private static double FrictionPerMs(AppSettings s) => 0.001 + (s.MomentumFriction / 100.0) * 0.005;
     }
 }

@@ -83,10 +83,15 @@ public sealed class GlobalMouseHook : IDisposable
             if (data.dwExtraInfo == NativeMethods.InjectionSignature)
                 return NativeMethods.CallNextHookEx(_thread.Handle, nCode, wParam, lParam);
 
+            // Alt + wheel passes through unsmoothed: apps bind it to discrete actions (browser back/forward)
+            if ((msg == NativeMethods.WM_MOUSEWHEEL || msg == NativeMethods.WM_MOUSEHWHEEL) && _keyboard.IsAltPressed)
+                return NativeMethods.CallNextHookEx(_thread.Handle, nCode, wParam, lParam);
+
             if (msg == NativeMethods.WM_MOUSEWHEEL)
             {
                 int delta = (short)((data.mouseData >> 16) & 0xffff);
                 var args = new MouseWheelEventArgs(delta);
+                SoftScroll.Core.WheelDiagnostics.Hook(delta);
 
                 if (_keyboard.IsCtrlPressed)
                 {
