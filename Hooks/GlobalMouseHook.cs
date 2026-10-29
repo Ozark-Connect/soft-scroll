@@ -46,6 +46,8 @@ public sealed class GlobalMouseHook : IDisposable
     public event EventHandler<MousePositionEventArgs>? MiddleButtonDown;
     public event EventHandler<MousePositionEventArgs>? MiddleButtonUp;
     public event EventHandler<MousePositionEventArgs>? MouseMoved;
+    /// <summary>Any mouse button went down (left, right, middle, X1/X2). Raised before MiddleButtonDown.</summary>
+    public event EventHandler? ButtonPressed;
 
     /// <summary>True while a MouseHWheel event raised from Shift + vertical wheel is being handled.</summary>
     public bool LastHWheelFromShift { get; private set; }
@@ -82,6 +84,10 @@ public sealed class GlobalMouseHook : IDisposable
             // (vendor mouse tools, remappers) are still smoothed
             if (data.dwExtraInfo == NativeMethods.InjectionSignature)
                 return NativeMethods.CallNextHookEx(_thread.Handle, nCode, wParam, lParam);
+
+            if (msg == NativeMethods.WM_LBUTTONDOWN || msg == NativeMethods.WM_RBUTTONDOWN
+                || msg == NativeMethods.WM_MBUTTONDOWN || msg == NativeMethods.WM_XBUTTONDOWN)
+                ButtonPressed?.Invoke(this, EventArgs.Empty);
 
             // Alt + wheel passes through unsmoothed: apps bind it to discrete actions (browser back/forward)
             if ((msg == NativeMethods.WM_MOUSEWHEEL || msg == NativeMethods.WM_MOUSEHWHEEL) && _keyboard.IsAltPressed)

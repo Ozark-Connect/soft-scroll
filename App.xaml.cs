@@ -14,6 +14,7 @@ public partial class App : System.Windows.Application
 {
     private TrayIcon? _tray;
     private GlobalMouseHook? _hook;
+    private GlobalKeyboardHook? _keyboardHook;
     private GlobalHotkey? _hotkey;
     private SettingsViewModel? _vm;
     private SmoothScrollEngine? _engine;
@@ -277,6 +278,11 @@ public partial class App : System.Windows.Application
             _middleClickEngine?.OnMouseMove(args.X, args.Y);
         };
 
+        // Any click or key press stops a momentum glide, as on macOS
+        _hook.ButtonPressed += (_, _) => _engine?.CancelGlide();
+        _keyboardHook = new GlobalKeyboardHook();
+        _keyboardHook.KeyPressed += (_, _) => _engine?.CancelGlide();
+
         UpdateHookState();
 
         // Start in the tray whenever "Start minimized" is on, not only when launched at sign-in.
@@ -445,10 +451,12 @@ public partial class App : System.Windows.Application
             _zoomEngine?.Start();
             _middleClickEngine?.Start();
             _hook.Install();
+            _keyboardHook?.Install();
         }
         else
         {
             _hook.Uninstall();
+            _keyboardHook?.Uninstall();
             _engine.Stop();
             _zoomEngine?.Stop();
             _middleClickEngine?.Stop();
@@ -464,6 +472,7 @@ public partial class App : System.Windows.Application
         base.OnExit(e);
         if (!_isPrimaryInstance) return;
         _hook?.Dispose();
+        _keyboardHook?.Dispose();
         _hotkey?.Dispose();
         _engine?.Dispose();
         _zoomEngine?.Dispose();

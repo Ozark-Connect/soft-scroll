@@ -304,6 +304,19 @@ public sealed class SmoothScrollEngine : IDisposable
             | (Down(NativeMethods.VK_LWIN) || Down(NativeMethods.VK_RWIN) ? MOD_WIN : 0);
     }
 
+    /// <summary>
+    /// Stops the momentum glide on both axes, and stops a flick that has not handed off yet
+    /// from starting one. A notch animation in progress still finishes. Called on any click or key press.
+    /// </summary>
+    public void CancelGlide()
+    {
+        lock (_lock)
+        {
+            _v.CancelGlide();
+            _h.CancelGlide();
+        }
+    }
+
     public void ResetHorizontalAxis()
     {
         lock (_lock)
@@ -372,6 +385,18 @@ public sealed class SmoothScrollEngine : IDisposable
             return Math.Abs(RemainingPx) >= 0.1
                 || UnitAccum != 0
                 || InMomentum;
+        }
+
+        public void CancelGlide()
+        {
+            if (InMomentum)
+            {
+                // Drop the sub-pulse remainder too, or it emits one last pulse after the stop
+                InMomentum = false;
+                Velocity = 0;
+                UnitAccum = 0;
+            }
+            _flingNotches = 0;
         }
 
         public void RegisterNotch(long nowMs, int delta, AppSettings s, double maxGlidePxPerMs)

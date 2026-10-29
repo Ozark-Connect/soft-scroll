@@ -14,8 +14,29 @@ internal static class NativeMethods
     internal const int WH_MOUSE_LL = 14;
     internal const int WM_MOUSEWHEEL = 0x020A;
     internal const int WM_MOUSEHWHEEL = 0x020E;
+    internal const int WM_LBUTTONDOWN = 0x0201;
+    internal const int WM_RBUTTONDOWN = 0x0204;
     internal const int WM_MBUTTONDOWN = 0x0207;
     internal const int WM_MBUTTONUP = 0x0208;
+    internal const int WM_XBUTTONDOWN = 0x020B;
+
+    // ── Keyboard Hook ──────────────────────────────────────────────
+
+    internal const int WH_KEYBOARD_LL = 13;
+    internal const int WM_KEYDOWN = 0x0100;
+    internal const int WM_KEYUP = 0x0101;
+    internal const int WM_SYSKEYDOWN = 0x0104;
+    internal const int WM_SYSKEYUP = 0x0105;
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct KBDLLHOOKSTRUCT
+    {
+        public uint vkCode;
+        public uint scanCode;
+        public uint flags;
+        public uint time;
+        public nint dwExtraInfo;
+    }
     internal const int WM_MOUSEMOVE = 0x0200;
     internal const int WM_INPUT = 0x00FF;
 
