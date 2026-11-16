@@ -23,6 +23,22 @@ dotnet publish -p:PublishProfile=Properties/PublishProfiles/SoftScrollSingleFile
 
 The pre-build `KillRunningInstance` target in the `.csproj` kills any running `SoftScroll.exe` to avoid file locks during build.
 
+### Launching a build for real use (the maintainer's workstation)
+
+The Debug build is the installed copy. The login entry (`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, value `SoftScroll`) starts `bin\Debug\net8.0-windows\SoftScroll.exe` directly, with no arguments.
+
+After a code change, launch it the way login does, with Explorer as the parent:
+
+```powershell
+dotnet build   # the pre-build step stops the running instance
+explorer.exe "$PWD\bin\Debug\net8.0-windows\SoftScroll.exe"   # from the repo root
+```
+
+- Never leave it running under `dotnet run`, a background task, `Start-Process` from the agent's shell, or a spawned terminal window. It then belongs to that launcher and stops with it.
+- Before launching, stop any instance and the launcher that owns it (`dotnet`, a `pwsh` window).
+- Verify: `(Get-Process SoftScroll).Parent.ProcessName` is `explorer`, and exactly one instance runs.
+- Do this without being asked after every change that needs a live test.
+
 Settings are persisted to `%AppData%/SoftScroll/settings.json`. Logs are written to `%AppData%/SoftScroll/logs/` (Serilog, 7-day retention).
 
 ## Architecture
