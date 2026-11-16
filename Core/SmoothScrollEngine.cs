@@ -306,7 +306,7 @@ public sealed class SmoothScrollEngine : IDisposable
 
     /// <summary>
     /// Stops the momentum glide on both axes, and stops a flick that has not handed off yet
-    /// from starting one. A notch animation in progress still finishes. Called on any click or key press.
+    /// from starting one. A notch animation in progress still finishes. Called on any key press.
     /// </summary>
     public void CancelGlide()
     {
@@ -314,6 +314,19 @@ public sealed class SmoothScrollEngine : IDisposable
         {
             _v.CancelGlide();
             _h.CancelGlide();
+        }
+    }
+
+    /// <summary>
+    /// Stops all scrolling on both axes: the glide and the notch animation. Called on any click.
+    /// A wheel pulse that lands after the click closes the menu or dropdown the click opened.
+    /// </summary>
+    public void CancelScroll()
+    {
+        lock (_lock)
+        {
+            _v.CancelScroll();
+            _h.CancelScroll();
         }
     }
 
@@ -396,6 +409,15 @@ public sealed class SmoothScrollEngine : IDisposable
                 Velocity = 0;
                 UnitAccum = 0;
             }
+            _flingNotches = 0;
+        }
+
+        public void CancelScroll()
+        {
+            InMomentum = false;
+            Velocity = 0;
+            RemainingPx = 0;
+            UnitAccum = 0;
             _flingNotches = 0;
         }
 

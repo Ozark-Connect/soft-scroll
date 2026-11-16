@@ -278,8 +278,9 @@ public partial class App : System.Windows.Application
             _middleClickEngine?.OnMouseMove(args.X, args.Y);
         };
 
-        // Any click or key press stops a momentum glide, as on macOS
-        _hook.ButtonPressed += (_, _) => _engine?.CancelGlide();
+        // A key press stops a momentum glide, as on macOS. A click stops the notch animation too:
+        // its tail still sends wheel pulses, and one after the click closes what the click opened.
+        _hook.ButtonPressed += (_, _) => _engine?.CancelScroll();
         _keyboardHook = new GlobalKeyboardHook();
         _keyboardHook.KeyPressed += (_, _) => _engine?.CancelGlide();
 
